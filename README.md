@@ -1,4 +1,16 @@
+<p><img src="docs/assets/app-icon.svg" width="88" height="88" alt="puresheets icon"></p>
+
 # puresheets
+
+## App documentation
+
+Edit spreadsheets using the open-source Univer engine.
+
+1. Create or open a workbook and enter your own data.
+2. Use cells, formulas, formatting, and worksheet tabs to organize the workbook.
+3. Save as `.sheets` or portable `.sheets.html`; use the available import/export controls when exchanging files with other spreadsheet tools.
+
+Read the [app guide](docs/app-guide.md) for usage and development requirements. This app runs within [puredesktop](https://puredesktop.ai).
 
 ## Open source and contributions
 
@@ -15,24 +27,12 @@ Copyright (c) 2026 pure.science inc. Third-party code, dependencies, and assets 
 
 ### Major open-source projects
 
-- [@univerjs/core](https://github.com/dream-num/univer).
-- [exceljs](https://github.com/exceljs/exceljs).
-- [react](https://github.com/react/react).
-- [react-dom](https://github.com/react/react).
-- [styled-components](https://github.com/styled-components/styled-components).
+| Project / source | Homepage or documentation | Support the maintainers |
+| --- | --- | --- |
+| [dream-num/univer](https://github.com/dream-num/univer) | [Homepage / docs](https://docs.univer.ai) | [Open Collective](https://opencollective.com/univer) |
+| [exceljs/exceljs](https://github.com/exceljs/exceljs) | [Project home](https://github.com/exceljs/exceljs) | — |
+| [react/react](https://github.com/react/react) | [Homepage / docs](https://react.dev) | — |
+| [styled-components/styled-components](https://github.com/styled-components/styled-components) | [Homepage / docs](https://styled-components.com) | [GitHub Sponsors](https://github.com/sponsors/quantizor) · [Open Collective](https://opencollective.com/styled-components) |
 
 Thank you to these projects and their contributors. Additional direct dependencies,
 upstream links, and asset notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-### Snapshot and development context
-
-Based on a cleaned snapshot from [Nikau-Dev/puresheets](https://github.com/Nikau-Dev/puresheets) at
-commit `a283b8021b7b9ac3333af97a37f9b88c1e2603df` (main branch snapshot, 2026-09-25).
-This repository begins with one clean initial commit; previous Git history was not copied.
-Bundled demo datasets, saved development records, and identifying personal examples were removed or anonymized.
-
-This is a PureDesktop app source repository. Local `@purescience/platform-*`
-dependencies refer to shared packages in the parent suite and are not included here.
-Use the matching PureDesktop development environment and the app's existing scripts;
-this snapshot alone is not a complete standalone desktop application.
-
