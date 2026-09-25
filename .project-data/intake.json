@@ -1,0 +1,8 @@
+{
+  "appNames": [
+    "PureSheets"
+  ],
+  "idea": "Adopt the existing PureSheets built-in app for app-development work. PureSheets provides spreadsheet editing for .sheets and portable .sheets.html workbooks.",
+  "questions": [],
+  "selectedAppName": "PureSheets"
+}

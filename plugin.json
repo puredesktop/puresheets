@@ -1,0 +1,432 @@
+{
+  "id": "sheets",
+  "name": "PureSheets",
+  "permissions": [
+    "filesystem",
+    "settings",
+    "agents"
+  ],
+  "entrypoint": {
+    "kind": "dev-url",
+    "url": "http://localhost:5204"
+  },
+  "app": {
+    "id": "plugin.sheets",
+    "slug": "sheets",
+    "name": "PureSheets",
+    "navigationLabel": "Sheets",
+    "productName": "pure.sheets",
+    "kind": "sheets",
+    "description": "Enterprise spreadsheet editing for .sheets and portable .sheets.html workbooks.",
+    "brand": {
+      "letter": "s",
+      "label": "Sheets"
+    },
+    "openableNameSuffixes": [
+      ".sheets",
+      ".sheets.html"
+    ],
+    "openableFileKinds": [
+      "spreadsheet",
+      "html",
+      "data",
+      "folder"
+    ],
+    "createEntities": [
+      {
+        "id": "spreadsheet-package",
+        "label": "Spreadsheet",
+        "description": "Create a new spreadsheet workbook package.",
+        "kind": "package",
+        "appSlug": "sheets",
+        "defaultName": "Untitled",
+        "packageSuffix": ".sheets",
+        "packageManifestFile": "manifest.json",
+        "packageContentFile": "workbook.json"
+      }
+    ],
+    "agents": {
+      "tools": [
+        {
+          "name": "autoFitRows",
+          "description": "Fit row heights using the live spreadsheet renderer after setting content, fonts and column widths. Enables text wrapping across the specified whole rows. Use for prose tables before completeWorkbook to avoid clipped text; not a content-quality check. Refused on protected sheets or when the renderer is unavailable.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "startRow": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "rowCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              }
+            },
+            "required": [
+              "startRow",
+              "rowCount"
+            ]
+          }
+        },
+        {
+          "name": "createWorkbook",
+          "description": "Start a NEW blank workbook without replacing the currently open file. Required when asked to create a new deliverable or preserve existing documents: a workbook restored on app startup is not permission to overwrite it. Flushes pending edits before switching; on failure the current workbook stays open. Then populate this fresh workbook and call completeWorkbook to save it to a unique new package. Do not use for requested edits to the current workbook.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        {
+          "name": "completeWorkbook",
+          "description": "Save the current workbook, verify its saved content, and return its durable deliverable receipt. Required after all requested writes before completing a mission. Use the returned workbook paths in the final result, never an upstream source path. Retry after a reported save or concurrent-change error; do not claim completion on error.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "name": "getSheetsContext",
+          "risk": "read",
+          "description": "Return the workbook: title, path, sheets with used ranges, locked ranges, chart counts, the active sheet, and the current selection.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "readRange",
+          "risk": "read",
+          "description": "Read the populated cells of an A1 range on one sheet: raw value, kind, and computed value for formulas. Omit range to read the sheet's used range. Capped at 500 cells.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "range": {
+                "type": "string"
+              }
+            }
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "findInWorkbook",
+          "risk": "read",
+          "description": "Find cells containing text across the workbook (or one sheet). Returns sheet, cell, and value, capped at 50 matches.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "sheet": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "applyCellChanges",
+          "description": "Write cell changes to a sheet directly. Every write is recorded in the workbook's agent log with before/after. Pass the sheet, the range the work covers, the cell changes, and a one-line summary \u2014 it is the line the user reads in the log. Requires an explicit sheet, target range and current expectedVersion from readRange/getSheetsContext. All changed cells must lie in the target range; stale workbook proposals are rejected. Call completeWorkbook after changes for saved artifact evidence.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "range": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "cellChanges": {
+                "type": "array",
+                "description": "The cells to write: A1 key, value (raw text or formula source), and kind. Formulas are kind 'formula' with the leading =. Locked cells are skipped, never mutated.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cell": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "number",
+                        "formula",
+                        "blank"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "cell",
+                    "value",
+                    "kind"
+                  ]
+                }
+              },
+              "expectedVersion": {
+                "type": "string",
+                "description": "Exact workbook version returned by getSheetsContext/readRange. Read again after any mutation."
+              }
+            },
+            "required": [
+              "sheet",
+              "range",
+              "expectedVersion",
+              "summary",
+              "cellChanges"
+            ]
+          },
+          "requiresApproval": true
+        },
+        {
+          "name": "getExchangeRate",
+          "risk": "read",
+          "description": "Fetch a dated published reference exchange rate from Frankfurter. Returns rate, asOf date and source URL; no models and no workbook mutations. Use the rate in formulas, cite its source/date, and never invent a rate on failure.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "description": "Source ISO currency code, e.g. USD"
+              },
+              "to": {
+                "type": "string",
+                "description": "Target ISO currency code, e.g. EUR"
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ]
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "addChart",
+          "description": "Add a chart from a range (bar, line, area, pie, donut, scatter). The range needs labels and numeric values. Recorded in the agent log.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "range": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bar",
+                  "line",
+                  "area",
+                  "pie",
+                  "donut",
+                  "scatter"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "range"
+            ]
+          },
+          "requiresApproval": true
+        },
+        {
+          "name": "listSheetChanges",
+          "risk": "read",
+          "description": "The agent log: recent agent writes to the workbook, newest first, with tool, summary, sheet, range, and changed-cell counts. Check it before repeating work another agent already did.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "number"
+              }
+            }
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "addSheet",
+          "description": "Add a blank sheet to the workbook and make it active. Refuses a name an existing sheet already carries.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": []
+          },
+          "requiresApproval": true
+        },
+        {
+          "name": "renameSheet",
+          "description": "Rename a sheet. Refuses a name another sheet already carries. Recorded in the agent log.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "requiresApproval": true
+        },
+        {
+          "name": "deleteSheet",
+          "risk": "destructive",
+          "description": "Delete a sheet by name or id \u2014 never defaults to the active sheet, and the last sheet cannot be deleted. Recorded in the agent log with its populated-cell count.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet"
+            ]
+          },
+          "requiresApproval": true
+        },
+        {
+          "name": "formatRange",
+          "description": "Apply cell formatting over an A1 range: bold, italic, underline, border, fontSize, textColor/fillColor (#RRGGBB), align, numberFormat, decimals, wrap (wrap|clip|overflow). Optional columnWidth (56\u2013360 pixels) and rowHeight (24\u2013160 pixels) resize entire columns/rows intersecting the range; size changes are refused on protected sheets. For prose tables, use wrapping and suitable sizes so content is readable; keep source IDs in concise notes rather than oversized prose cells. Recorded in the agent log.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "range": {
+                "type": "string"
+              },
+              "bold": {
+                "type": "boolean"
+              },
+              "wrap": {
+                "type": "string",
+                "enum": [
+                  "wrap",
+                  "clip",
+                  "overflow"
+                ]
+              },
+              "columnWidth": {
+                "type": "number",
+                "minimum": 56,
+                "maximum": 360
+              },
+              "rowHeight": {
+                "type": "number",
+                "minimum": 24,
+                "maximum": 160
+              },
+              "italic": {
+                "type": "boolean"
+              },
+              "underline": {
+                "type": "boolean"
+              },
+              "border": {
+                "type": "boolean"
+              },
+              "fontSize": {
+                "type": "number"
+              },
+              "textColor": {
+                "type": "string"
+              },
+              "fillColor": {
+                "type": "string"
+              },
+              "align": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ]
+              },
+              "numberFormat": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "number",
+                  "currency",
+                  "percent",
+                  "date"
+                ]
+              },
+              "decimals": {
+                "type": "number"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "range"
+            ]
+          },
+          "requiresApproval": true
+        },
+        {
+          "name": "setCellComment",
+          "description": "Set or clear the note on one cell. An empty comment clears it. Notes annotate \u2014 they never change cell values.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string"
+              },
+              "cell": {
+                "type": "string"
+              },
+              "comment": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cell"
+            ]
+          },
+          "requiresApproval": true
+        }
+      ]
+    }
+  }
+}

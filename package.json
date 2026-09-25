@@ -1,0 +1,38 @@
+{
+  "name": "@purescience/puresheets",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./data": "./src/data.ts"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "puredesktop:check": "node scripts/validate-puredesktop-app.mjs"
+  },
+  "dependencies": {
+    "@purescience/platform-ui": "file:../../packages/ui",
+    "@univerjs/core": "^0.25.0",
+    "@univerjs/preset-sheets-conditional-formatting": "^0.25.0",
+    "@univerjs/preset-sheets-core": "^0.25.0",
+    "exceljs": "^4.4.0",
+    "lucide-react": "^0.525.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "styled-components": "^6.1.18",
+    "@purescience/platform-bridge": "file:../../packages/bridge"
+  },
+  "devDependencies": {
+    "@swc/plugin-styled-components": "^12.9.0",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react-swc": "^3.10.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  },
+  "license": "MIT"
+}
