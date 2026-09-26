@@ -2,9 +2,25 @@
 
 # puresheets
 
-## What puresheets does
+**Work with data, formulas, and editable spreadsheets.** An app for [puredesktop](https://puredesktop.ai).
+
+[Get started](#getting-started) · [App guide](docs/app-guide.md) · [Develop](docs/development.md) · [Developer account](https://puredesktop.ai/developers)
+
+## What it does
 
 A spreadsheet editor built on Univer, with cells, formulas, formatting, worksheet tabs, data rules, comments, and charts. Work with editable workbooks and exchange supported spreadsheet formats.
+
+## Requirements
+
+Use a compatible [puredesktop](https://puredesktop.ai) build for desktop integration, storage, and the app drawer. Developer setup is covered in the [development guide](docs/development.md).
+
+Open or create a workbook. Agent assistance and external exchange-rate lookups use their configured host services.
+
+## Getting started
+
+1. Create or open a workbook and enter your own data.
+2. Use cells, formulas, formatting, and worksheet tabs to organize the workbook.
+3. Save as `.sheets` or portable `.sheets.html`; use the available import/export controls when exchanging files with other spreadsheet tools.
 
 ## App layout
 
@@ -17,31 +33,45 @@ A spreadsheet editor built on Univer, with cells, formulas, formatting, workshee
 
 The app also uses the shared [puredesktop](https://puredesktop.ai) shell and drawer agent. Panels can vary with the current view and selection.
 
-## Getting started
+## Working with the agent
 
-1. Create or open a workbook and enter your own data.
-2. Use cells, formulas, formatting, and worksheet tabs to organize the workbook.
-3. Save as `.sheets` or portable `.sheets.html`; use the available import/export controls when exchanging files with other spreadsheet tools.
+Open the app’s drawer in [puredesktop](https://puredesktop.ai) and describe what you want to do. For example:
 
-Read the [app guide](docs/app-guide.md) for development, loading, and source-layout details.
+> Read the totals in this range.
+>
+> Format the header row and add a chart.
+
+The app exposes 15 tools, including `getSheetsContext`, `readRange`, `findInWorkbook`. See [agents.md](agents.md) for workflows and [plugin.json](plugin.json) for the complete tool schemas and approval flags. Some actions apply directly, while approval-marked actions ask first. Check the result in the app after a change.
+
+## Files and data
+
+Save editable `.sheets` workbooks or portable `.sheets.html` files. Spreadsheet import/export uses the supported formats exposed by the app.
 
 ## Develop and customize
 
-We welcome **developers and vibecoders alike**. You can add features to puresheets, develop a fork, or create a new app for [puredesktop](https://puredesktop.ai).
+We welcome **developers and vibecoders alike**. Fork puresheets, add a feature, or use what you learn to build a new app.
 
-### Use Claude Code, Codex, or your own tools
+| Develop your way | Workflow |
+| --- | --- |
+| **Claude Code, Codex, or your editor** | Open the app’s source folder, read `README.md`, `plugin.json`, `package.json`, and `agents.md`, then make changes and run the app’s checks. Test inside [puredesktop](https://puredesktop.ai) with matching shared platform packages. |
+| **purefactory** | Choose **Start building** for a new app, or select an available app project to extend it. Use **Open folder** for external tools and **Open app** to test. |
+| **App drawer** | Request a local app change where app-development integration is available. Make clear whether you want to change the app itself or its current document. |
 
-Open a local source checkout or a purefactory project's folder in your preferred coding tool. Ask it to read this README, `plugin.json`, `package.json`, `agents.md`, and the [development guide](docs/development.md) before making changes. Review the changes, run the app's checks, and test it inside [puredesktop](https://puredesktop.ai). This source may require matching shared platform packages; a browser preview alone does not provide desktop services.
+Use **Share** in purefactory to create a `.pureapp` package, then **Settings → System → Install an app → Choose package…** to load it in current builds. Source availability and integration vary by host build.
 
-The [development guide](docs/development.md) explains how to start Claude Code or Codex in the project, work on this repository, and load your app into the desktop.
+Follow the [development guide](docs/development.md) for Claude Code/Codex commands, app-specific setup and checks, and packaging. A standalone browser preview does not provide every desktop service.
 
-### Use purefactory inside the desktop
+## Documentation and limitations
 
-Open **purefactory** (Factory) to describe a new app, or select an available app project and request a feature. Use **Open folder** to continue with external tools and **Open app** to test the result. You can also request a local app change through the app's drawer where app-development integration is available; distinguish changing the app from editing its current document.
+| Guide | What it covers |
+| --- | --- |
+| [App guide](docs/app-guide.md) | App overview, source layout, and usage. |
+| [Development guide](docs/development.md) | External coding tools, purefactory, checks, and installation. |
+| [Agent guide](agents.md) | App-specific agent workflows and constraints. |
 
-Use **Share** in purefactory to create a `.pureapp` package. In current builds, install it through **Settings → System → Install an app → Choose package…**. See the [development guide](docs/development.md#load-and-share-your-app) for the full workflow and version differences.
+Verify formulas, formatting, and charts after exchanging files with other spreadsheet tools; not every feature has an exact equivalent.
 
-## Developer accounts and the marketplace
+## Contributing and marketplace
 
 We welcome **developers and vibecoders alike**. Go to [puredesktop.ai](https://puredesktop.ai) and [create a developer account](https://puredesktop.ai/developers) to join the developer community and submit your app for review.
 
@@ -49,13 +79,11 @@ Bring improvements to this app, develop a fork, or build something entirely new.
 
 For developer access, app submissions, or marketplace questions, contact [info@puredesktop.ai](mailto:info@puredesktop.ai).
 
-## Open source and contributions
+Anyone may use, study, modify, and share this app under its applicable licenses. We welcome pull requests, bug reports, and documentation improvements. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Credits and license
 
 A spreadsheet app based on the open-source [Univer](https://github.com/dream-num/univer) project (Apache-2.0), with [ExcelJS](https://github.com/exceljs/exceljs) for workbook interchange.
-
-Anyone may use, study, modify, and share this software under the applicable licenses.
-We welcome pull requests, bug reports, documentation improvements, and new ideas.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.
 
 ### License
 
