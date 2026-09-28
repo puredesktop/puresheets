@@ -181,7 +181,7 @@ export function UniverSpreadsheetSurface({
 
     async function mountUniver(): Promise<void> {
       const [
-        { LocaleType, Univer, UniverInstanceType },
+        { LocaleType, ThemeService, Univer, UniverInstanceType },
         { UniverSheetsCorePreset },
         { UniverSheetsConditionalFormattingPreset },
         { FUniver },
@@ -199,12 +199,25 @@ export function UniverSpreadsheetSurface({
 
       const univer = new Univer({
         locale: LocaleType.EN_US,
+        darkMode: document.documentElement.dataset.platformTheme === 'dark',
         locales: {
           [LocaleType.EN_US]: {
             ...enUS.default,
             ...conditionalFormattingEnUS.default,
           },
         },
+      })
+      // Keep Univer's own controls and selection overlays in step with the
+      // platform theme. PureSheets chrome already follows the shell theme,
+      // but Univer is mounted as a separate UI tree and does not inherit it.
+      const themeObserver = new MutationObserver(() => {
+        univer.__getInjector().get(ThemeService).setDarkMode(
+          document.documentElement.dataset.platformTheme === 'dark',
+        )
+      })
+      themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-platform-theme'],
       })
       const preset = UniverSheetsCorePreset({
         container: hostRef.current,
@@ -1218,6 +1231,7 @@ export function UniverSpreadsheetSurface({
 
       disposeUniver = () => {
         reloadUnitRef.current = null
+        themeObserver.disconnect()
         applyValidationFlagsRef.current = null
         resizeObserver.disconnect()
         if (resizeRaf) window.cancelAnimationFrame(resizeRaf)
