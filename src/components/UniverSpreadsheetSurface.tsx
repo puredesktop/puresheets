@@ -197,9 +197,11 @@ export function UniverSpreadsheetSurface({
       ])
       if (disposed || !hostRef.current || !lastSnapshotRef.current) return
 
+      const isDarkAppearance = (): boolean =>
+        document.documentElement.dataset.platformTheme === 'dark'
       const univer = new Univer({
         locale: LocaleType.EN_US,
-        darkMode: document.documentElement.dataset.platformTheme === 'dark',
+        darkMode: isDarkAppearance(),
         locales: {
           [LocaleType.EN_US]: {
             ...enUS.default,
@@ -212,12 +214,12 @@ export function UniverSpreadsheetSurface({
       // but Univer is mounted as a separate UI tree and does not inherit it.
       const themeObserver = new MutationObserver(() => {
         univer.__getInjector().get(ThemeService).setDarkMode(
-          document.documentElement.dataset.platformTheme === 'dark',
+          isDarkAppearance(),
         )
       })
       themeObserver.observe(document.documentElement, {
         attributes: true,
-        attributeFilter: ['data-platform-theme'],
+        attributeFilter: ['data-platform-theme', 'data-platform-appearance'],
       })
       const preset = UniverSheetsCorePreset({
         container: hostRef.current,
