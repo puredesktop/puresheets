@@ -73,6 +73,7 @@ export function createUniverSnapshot(
     name: document.metadata.title,
     appVersion: UNIVER_APP_VERSION,
     locale: LocaleType.EN_US,
+    defaultStyle: CELL_DEFAULT_STYLE,
     styles: collectStyles(document),
     sheetOrder: document.workbook.sheets.map(sheet => sheet.id),
     sheets,
@@ -173,12 +174,23 @@ export function documentFromEditorSnapshot(
   return documentFromUniverSnapshot({ ...snapshot, name: current.metadata.title }, current)
 }
 
+/**
+ * Univer's default cell text (11pt black Arial) reads heavy: 10pt in a softened
+ * ink instead, so a wrapped cell's two lines sit comfortably in its row. Arial
+ * stays: it is hinted for 1x screens, where a canvas renders other faces soft.
+ * Set on the workbook and each sheet (the renderer reads the sheet's); never
+ * written into cell styles, so it is not saved into documents, and a cell that
+ * sets its own font, size or colour keeps it.
+ */
+const CELL_DEFAULT_STYLE = { ff: 'Arial', fs: 10, cl: { rgb: '#3a404a' } }
+
 function createUniverSheetSnapshot(
   sheet: WorkbookSheet,
 ): Partial<IWorksheetData> {
   return {
     id: sheet.id,
     name: sheet.name,
+    defaultStyle: CELL_DEFAULT_STYLE,
     tabColor: '',
     hidden: BooleanNumber.FALSE,
     freeze: {
