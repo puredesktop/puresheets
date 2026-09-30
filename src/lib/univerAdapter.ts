@@ -73,6 +73,9 @@ export function createUniverSnapshot(
     name: document.metadata.title,
     appVersion: UNIVER_APP_VERSION,
     locale: LocaleType.EN_US,
+    // Univer's default (Arial, pure black) reads heavy on the canvas. A lighter
+    // face and a soft ink; any cell that sets its own font or colour keeps it.
+    defaultStyle: { ff: '"Helvetica Neue", Helvetica, Arial, sans-serif', cl: { rgb: '#30363f' } },
     styles: collectStyles(document),
     sheetOrder: document.workbook.sheets.map(sheet => sheet.id),
     sheets,
