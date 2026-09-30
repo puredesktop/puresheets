@@ -180,7 +180,7 @@ export function documentFromEditorSnapshot(
  * renderer reads the sheet's); never written into cell styles, so it is not
  * saved into documents, and a cell that sets its own font or colour keeps it.
  */
-const CELL_DEFAULT_STYLE = { ff: '"Helvetica Neue", Helvetica, Arial, sans-serif', cl: { rgb: '#30363f' } }
+const CELL_DEFAULT_STYLE = { ff: '"Helvetica Neue", Helvetica, Arial, sans-serif', cl: { rgb: '#4a5260' } }
 
 function createUniverSheetSnapshot(
   sheet: WorkbookSheet,
