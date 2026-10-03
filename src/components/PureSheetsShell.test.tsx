@@ -3,6 +3,12 @@ import { act } from 'react'
 import type React from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createUniverSnapshot } from '../lib/univerAdapter'
+import {
+  serializeSheetsHtmlDocument,
+  loadSheetsHtmlDocument,
+} from '../lib/sheetsDocument'
+import type { UniverEditorBridge } from './univerBridgeTypes'
 import { createBlankWorkbook } from '../lib/workbookModel'
 import { PureSheetsShell } from './PureSheetsShell'
 import type { SheetsAgentToolContext } from '../agents/catalog'
@@ -274,6 +280,9 @@ afterEach(() => {
   }
   document.body.innerHTML = ''
   vi.clearAllMocks()
+  autosavePlatformDocument
+    .mockReset()
+    .mockResolvedValue({ savedAt: '2026-07-02T12:00:00.000Z' })
   vi.useRealTimers()
 })
 
@@ -343,8 +352,10 @@ describe('PureSheetsShell file safety', () => {
       await Promise.resolve()
     })
 
-    expect(readTextFile).toHaveBeenCalledWith('/workspace/broken.sheets')
-    expect(onResourceHandled).toHaveBeenCalled()
+    expect(readTextFile).toHaveBeenCalledWith(
+      '/workspace/broken.sheets/workbook.json',
+    )
+    expect(onResourceHandled).not.toHaveBeenCalled()
     expect(document.body.textContent).toContain('JSON')
 
     await act(async () => {
@@ -1714,5 +1725,332 @@ describe('PureSheetsShell file safety', () => {
     expect(document.body.textContent).toContain(
       'Sum 60 · Avg 20 · Min 10 · Max 30 · Count 3',
     )
+  })
+})
+
+
+describe('workbook persistence audit regressions', () => {
+  function editCell(value: string): void {
+    agentContext.setDocument(current => ({
+      ...current,
+      workbook: {
+        ...current.workbook,
+        sheets: current.workbook.sheets.map(sheet => ({
+          ...sheet,
+          cells: { ...sheet.cells, A1: { value, kind: 'text' as const } },
+        })),
+      },
+    }))
+  }
+  it('reports explicit save failure instead of claiming all changes saved', async () => {
+    autosavePlatformDocument.mockRejectedValueOnce(
+      Error('Disk full on explicit save'),
+    )
+    render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook('Do not lose this')}
+      />,
+    )
+    await act(async () => {
+      triggerSave()
+      await flushAsync()
+    })
+    expect(document.body.textContent).toContain('Disk full on explicit save')
+    expect(document.body.textContent).not.toContain('All changes saved')
+    expect(document.body.textContent).not.toContain('Draft saved — name it')
+    expect(agentContext.document?.metadata.title).toBe('Do not lose this')
+  })
+  it('keeps the old workbook and binding when saving before an open fails', async () => {
+    const first = createBlankWorkbook('Keep A'),
+      second = createBlankWorkbook('Do not open B')
+    readTextFile.mockImplementation(async (path: string) =>
+      JSON.stringify(path.startsWith('/A') ? first : second),
+    )
+    const { root } = render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook()}
+        resource={{ path: '/A.sheets' }}
+      />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    await act(async () => editCell('Unsaved A'))
+    autosavePlatformDocument.mockRejectedValueOnce(Error('Cannot write A'))
+    const handled = vi.fn()
+    await act(async () => {
+      root.render(
+        <PureSheetsShell
+          initialDocument={createBlankWorkbook()}
+          resource={{ path: '/B.sheets' }}
+          onResourceHandled={handled}
+        />,
+      )
+      await flushAsync()
+    })
+    expect(agentContext.document?.metadata.title).toBe('Keep A')
+    expect(agentContext.document?.workbook.sheets[0].cells.A1.value).toBe(
+      'Unsaved A',
+    )
+    expect(agentContext.currentFilePath?.()).toBe('/A.sheets')
+    expect(handled).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('Cannot write A')
+  })
+  it('does not replace an unsaved workbook when creating its draft fails', async () => {
+    render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook('Unsaved predecessor')}
+      />,
+    )
+    createPlatformDraft.mockRejectedValueOnce(
+      Error('Draft storage unavailable'),
+    )
+    await act(async () => editCell('Keep this typing'))
+    createPlatformDraft.mockRejectedValueOnce(
+      Error('Draft storage unavailable'),
+    )
+    await act(async () => {
+      await expect(
+        agentContext.createWorkbook!('Must not replace'),
+      ).rejects.toThrow()
+    })
+    expect(agentContext.document?.metadata.title).toBe('Unsaved predecessor')
+    expect(agentContext.document?.workbook.sheets[0].cells.A1.value).toBe(
+      'Keep this typing',
+    )
+    expect(agentContext.currentFilePath?.()).toBe('')
+  })
+  it('saves the old HTML file as HTML before adopting a package', async () => {
+    const first = createBlankWorkbook('Flat A'),
+      second = createBlankWorkbook('Package B')
+    readTextFile.mockImplementation(async (path: string) =>
+      path === '/A.sheets.html'
+        ? serializeSheetsHtmlDocument(first)
+        : JSON.stringify(second),
+    )
+    const { root } = render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook()}
+        resource={{ path: '/A.sheets.html' }}
+      />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    await act(async () => editCell('Flat edit'))
+    await act(async () => {
+      root.render(
+        <PureSheetsShell
+          initialDocument={createBlankWorkbook()}
+          resource={{ path: '/B.sheets' }}
+        />,
+      )
+      await flushAsync()
+    })
+    const request = autosavePlatformDocument.mock.calls[0][0] as {
+      path: string
+      files: { name: string | null; content: string }[]
+    }
+    expect(request.path).toBe('/A.sheets.html')
+    expect(request.files).toHaveLength(1)
+    expect(request.files[0].name).toBeNull()
+    expect(
+      loadSheetsHtmlDocument(request.files[0].content).workbook.sheets[0].cells
+        .A1.value,
+    ).toBe('Flat edit')
+    expect(agentContext.document?.metadata.title).toBe('Package B')
+  })
+  it('saves the old package with workbook.json before adopting a legacy flat file', async () => {
+    const first = createBlankWorkbook('Package A'),
+      second = createBlankWorkbook('Legacy B')
+    readTextFile.mockImplementation(async (path: string) => {
+      if (path === '/B.sheets/workbook.json') throw Error('ENOTDIR')
+      return JSON.stringify(path.startsWith('/A') ? first : second)
+    })
+    const { root } = render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook()}
+        resource={{ path: '/A.sheets' }}
+      />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    await act(async () => editCell('Package edit'))
+    await act(async () => {
+      root.render(
+        <PureSheetsShell
+          initialDocument={createBlankWorkbook()}
+          resource={{ path: '/B.sheets' }}
+        />,
+      )
+      await flushAsync()
+    })
+    const request = autosavePlatformDocument.mock.calls[0][0] as {
+      path: string
+      files: { name: string | null; content: string }[]
+    }
+    expect(request.path).toBe('/A.sheets')
+    expect(request.files.map(file => file.name)).toEqual([
+      'manifest.json',
+      'workbook.json',
+    ])
+    expect(
+      JSON.parse(request.files[1].content).workbook.sheets[0].cells.A1.value,
+    ).toBe('Package edit')
+    expect(agentContext.document?.metadata.title).toBe('Legacy B')
+  })
+  it('New saves its dirty predecessor as a package before detaching', async () => {
+    readTextFile.mockResolvedValue(
+      JSON.stringify(createBlankWorkbook('Previous')),
+    )
+    render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook()}
+        resource={{ path: '/A.sheets' }}
+      />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    await act(async () => editCell('Retain this'))
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'n', metaKey: true }),
+      )
+      await flushAsync()
+    })
+    const request = autosavePlatformDocument.mock.calls[0][0] as {
+      path: string
+      files: { name: string | null; content: string }[]
+    }
+    expect(request.path).toBe('/A.sheets')
+    expect(request.files[1].name).toBe('workbook.json')
+    expect(request.files[1].content).toContain('Retain this')
+    expect(agentContext.currentFilePath?.()).toBe('')
+    expect(agentContext.document?.metadata.title).toBe('Untitled')
+  })
+  it('commits a pending in-cell edit before saving its current snapshot', async () => {
+    const initial = createBlankWorkbook('Pending cell')
+    render(<PureSheetsShell initialDocument={initial} />)
+    const commit = vi.fn(async () => true)
+    const live = {
+      ...initial,
+      workbook: {
+        ...initial.workbook,
+        sheets: initial.workbook.sheets.map(sheet => ({
+          ...sheet,
+          cells: { A1: { value: 'Latest typing', kind: 'text' as const } },
+        })),
+      },
+    }
+    const snapshot = vi.fn(async () => {
+      expect(commit).toHaveBeenCalledTimes(1)
+      return createUniverSnapshot(live)
+    })
+    await act(async () =>
+      surfaceRender.mock.calls.at(-1)![0].onEditorReady({
+        isCellEditing: () => true,
+        commitEditing: commit,
+        flushSnapshot: snapshot,
+      } as unknown as UniverEditorBridge),
+    )
+    await act(async () => {
+      triggerSave()
+      await flushAsync()
+    })
+    expect(lastSavedContent()).toContain('Latest typing')
+    expect(document.body.textContent).toMatch(/Draft saved|All changes saved/)
+  })
+  it('rejects a delayed tool mutation from the previous workbook', async () => {
+    const initial = createBlankWorkbook('Previous context')
+    initial.workbook.sheets[0].rowCount = 4
+    render(<PureSheetsShell initialDocument={initial} />)
+    const previousContext = agentContext
+    await act(async () => {
+      await agentContext.createWorkbook!('Current context')
+    })
+    expect(() =>
+      previousContext.setDocument(current => ({
+        ...current,
+        metadata: { ...current.metadata, title: 'Stale tool overwrite' },
+      })),
+    ).toThrow('workbook changed')
+    expect(agentContext.document?.metadata.title).toBe('Current context')
+  })
+  it('saves formula-bar typing with Command-S before the field loses focus', async () => {
+    const initial = createBlankWorkbook('Formula draft')
+    initial.workbook.sheets[0].rowCount = 4
+    render(<PureSheetsShell initialDocument={initial} />)
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Formula or value"]',
+    )!
+    await act(async () => {
+      input.focus()
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, '=SUM(10,20)')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+      triggerSave()
+      await flushAsync(24)
+    })
+    expect(lastSavedContent()).toContain('=SUM(10,20)')
+    expect(agentContext.document?.workbook.sheets[0].cells.A1.value).toBe(
+      '=SUM(10,20)',
+    )
+  })
+  it('refuses a success indication when the editor snapshot cannot be read', async () => {
+    render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook('Keep editor content')}
+      />,
+    )
+    await act(async () =>
+      surfaceRender.mock.calls.at(-1)![0].onEditorReady({
+        isCellEditing: () => false,
+        flushSnapshot: async () => {
+          throw Error('Editor read failed')
+        },
+      } as unknown as UniverEditorBridge),
+    )
+    await act(async () => {
+      triggerSave()
+      await flushAsync()
+    })
+    expect(document.body.textContent).toContain('Editor read failed')
+    expect(createPlatformDraft).not.toHaveBeenCalled()
+    expect(autosavePlatformDocument).not.toHaveBeenCalled()
+  })
+  it('keeps failed resources retryable and consumes only a successful retry', async () => {
+    readTextFile.mockRejectedValue(Error('Permission denied'))
+    const handled = vi.fn()
+    render(
+      <PureSheetsShell
+        initialDocument={createBlankWorkbook('Stay here')}
+        resource={{ path: '/Retry.sheets' }}
+        onResourceHandled={handled}
+      />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    expect(handled).not.toHaveBeenCalled()
+    expect(agentContext.document?.metadata.title).toBe('Stay here')
+    readTextFile.mockResolvedValue(
+      JSON.stringify(createBlankWorkbook('Retry worked')),
+    )
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find(button => button.textContent === 'Retry opening workbook')!
+        .click()
+      await flushAsync()
+    })
+    expect(handled).toHaveBeenCalledTimes(1)
+    expect(agentContext.document?.metadata.title).toBe('Retry worked')
+    expect(createPlatformDraft).not.toHaveBeenCalled()
+    expect(autosavePlatformDocument).not.toHaveBeenCalled()
   })
 })

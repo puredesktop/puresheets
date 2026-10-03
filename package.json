@@ -14,9 +14,9 @@
   },
   "dependencies": {
     "@purescience/platform-ui": "file:../../packages/ui",
-    "@univerjs/core": "^0.25.0",
-    "@univerjs/preset-sheets-conditional-formatting": "^0.25.0",
-    "@univerjs/preset-sheets-core": "^0.25.0",
+    "@univerjs/core": "0.25.1",
+    "@univerjs/preset-sheets-conditional-formatting": "0.25.1",
+    "@univerjs/preset-sheets-core": "0.25.1",
     "exceljs": "^4.4.0",
     "lucide-react": "^0.525.0",
     "react": "^19.1.0",
@@ -25,13 +25,18 @@
     "@purescience/platform-bridge": "file:../../packages/bridge"
   },
   "devDependencies": {
-    "@swc/plugin-styled-components": "^12.9.0",
+    "@swc/plugin-styled-components": "13.0.0",
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.5",
     "@vitejs/plugin-react-swc": "^3.10.2",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "@swc/core": "1.16.1",
+    "happy-dom": "^17.4.4",
+    "@univerjs/sheets": "0.25.1",
+    "@univerjs/engine-formula": "0.25.1",
+    "@univerjs/sheets-formula": "0.25.1"
   },
   "license": "MIT"
 }

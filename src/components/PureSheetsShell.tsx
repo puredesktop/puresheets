@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
+import { createWorkbookTransitions } from '../lib/workbookTransitions'
+import { useWorkbookResourceOpen } from '../hooks/useWorkbookResourceOpen'
 import { useSheetsAgentTools } from '../hooks/useSheetsAgentTools'
 import { AppFrame } from '@purescience/platform-bridge/components/AppFrame'
 import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
@@ -113,6 +115,7 @@ import type {
   WorkbookChart,
   WorkbookSheet,
 } from '../types'
+import { ToolTextButton } from './controls'
 import { AgentActivityBar } from './AgentActivityBar'
 import {
   CommandBar,
@@ -159,20 +162,40 @@ export function PureSheetsShell({
 }: PureSheetsShellProps): React.ReactElement {
   const [document, setDocumentState] = useState(initialDocument)
   const documentRef = useRef(document)
-  const setDocument = useCallback((update: PureSheetsDocument | ((current: PureSheetsDocument) => PureSheetsDocument)): void => {
-    const next = typeof update === 'function' ? update(documentRef.current) : update
-    documentRef.current = next
-    setDocumentState(next)
-  }, [])
+  const setDocument = useCallback(
+    (
+      update:
+        | PureSheetsDocument
+        | ((current: PureSheetsDocument) => PureSheetsDocument),
+    ): void => {
+      const next =
+        typeof update === 'function' ? update(documentRef.current) : update
+      documentRef.current = next
+      setDocumentState(next)
+    },
+    [],
+  )
   const [filePath, setFilePath] = useState('')
   const [selectedCell, setSelectedCell] = useState('A1')
   const [editValue, setEditValue] = useState('')
-  const [saveState, setSaveState] = useState<SaveState>('saved')
+  const [saveState, setSaveStateState] = useState<SaveState>('saved')
+  const saveStateRef = useRef<SaveState>('saved')
+  const setSaveState = useCallback((state: SaveState) => {
+    saveStateRef.current = state
+    setSaveStateState(state)
+  }, [])
+  const [switching, setSwitching] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Ready')
   // Brief, prominent confirmation (e.g. copy/cut) — easy to miss in the status
   // bar, so surface it as a fading toast too (#277).
   const [toast, setToast] = useState<string | null>(null)
   const toastTimerRef = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
+    },
+    [],
+  )
   function showToast(message: string): void {
     setToast(message)
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
@@ -195,67 +218,66 @@ export function PureSheetsShell({
   const [selectedRange, setSelectedRange] = useState('A1:A1')
   const [univerSelection, setUniverSelection] =
     useState<UniverSelectionState | null>(null)
-  useSheetsAgentTools(true, {
-    document,
-    setDocument: updater => {
-      commitDocument(updater)
-      refreshUniverSurface()
+  useSheetsAgentTools(
+    true,
+    {
+      document,
+      setDocument: updater => {
+        if (workbookVersion !== transitions.version)
+          throw Error(
+            'The workbook changed while the tool was running. Read its current context again.',
+          )
+        commitDocument(updater)
+        refreshUniverSurface()
+      },
+      filePath,
+      currentFilePath: () => boundPathRef.current ?? '',
+      selectedRange,
+      autoFitRows: async (sheetId, rows) =>
+        (await univerEditorRef.current?.autoFitRows(sheetId, rows)) ?? false,
+      createWorkbook: async title => {
+        const fresh = createBlankWorkbook(title)
+        if (!(await newWorkbook(fresh)))
+          throw Error('A newer workbook request superseded creation.')
+        return { title: fresh.metadata.title, filePath: null }
+      },
+      completeWorkbook: async () => {
+        if (transitions.busy)
+          throw Error('Wait for the workbook to finish opening before saving.')
+        await captureEditorWorkbook()
+        const snapshot = documentRef.current
+        const originalPath = boundPathRef.current
+        const completionVersion = transitions.version
+        let savedPath: string | null = null
+        return createWorkbookReceipt({
+          save: async () => {
+            savedPath = await persistWorkbook(snapshot)
+            const payload = savedWorkbookPayloadRef.current
+            if (!payload)
+              throw new Error(
+                'Workbook save did not return its written content.',
+              )
+            return {
+              path: savedPath,
+              contentPath: payload.name
+                ? `${savedPath}/${payload.name}`
+                : savedPath,
+              content: payload.content,
+            }
+          },
+          read: readTextFile,
+          unchanged: () =>
+            documentRef.current === snapshot &&
+            transitions.version === completionVersion &&
+            (boundPathRef.current === originalPath ||
+              boundPathRef.current === savedPath),
+        })
+      },
     },
-    filePath,
-    currentFilePath: () => boundPathRef.current ?? '',
-    selectedRange,
-    autoFitRows: async (sheetId, rows) =>
-      await univerEditorRef.current?.autoFitRows(sheetId, rows) ?? false,
-    createWorkbook: async title => {
-      const previous = documentRef.current
-      const previousPath = boundPathRef.current
-      if ((filePath.trim() || null) !== previousPath)
-        throw new Error('Workbook is switching; retry creation once it is open.')
-      // flush is a forced write, not a dirty-only drain. Do not rewrite a clean
-      // restored file merely because the agent is creating another workbook.
-      if (saveState !== 'saved' || lifecycleRef.current.doc.saving)
-        await lifecycleRef.current.flush({ throwOnError: true })
-      if (documentRef.current !== previous || boundPathRef.current !== previousPath)
-        throw new Error('Workbook changed while saving; retry creation.')
-      // Flush succeeded against the old binding. Detach it synchronously before
-      // exposing the blank document, so subsequent agent writes cannot save over it.
-      lifecycleRef.current.reset()
-      boundPathRef.current = null
-      lastPathRef.current = null
-      savedWorkbookPayloadRef.current = null
-      const fresh = createBlankWorkbook(title)
-      documentRef.current = fresh
-      boundDocRef.current = fresh
-      newWorkbook(fresh)
-      return { title: fresh.metadata.title, filePath: null }
-    },
-    completeWorkbook: async () => {
-      const snapshot = documentRef.current
-      const originalPath = boundPathRef.current
-      let savedPath: string | null = null
-      return createWorkbookReceipt({
-        save: async () => {
-          if ((filePath.trim() || null) !== originalPath)
-            throw new Error('Workbook is switching; retry completion once it is open.')
-          boundDocRef.current = snapshot
-          // A new draft is a package before the lifecycle serializes it.
-          if (!originalPath) boundIsPackageRef.current = true
-          const lifecycle = lifecycleRef.current
-          savedPath = await lifecycle.ensureDraft()
-          if (!savedPath) throw new Error('Could not create a saved workbook draft.')
-          if (documentRef.current !== snapshot)
-            throw new Error('Workbook changed while creating its draft.')
-          await lifecycle.flush({ throwOnError: true })
-          const payload = savedWorkbookPayloadRef.current
-          if (!payload) throw new Error('Workbook save did not return its written content.')
-          return { path: savedPath, contentPath: payload.name ? `${savedPath}/${payload.name}` : savedPath, content: payload.content }
-        },
-        read: readTextFile,
-        unchanged: () => documentRef.current === snapshot &&
-          (boundPathRef.current === originalPath || boundPathRef.current === savedPath),
-      })
-    },
-  })
+    () => !transitions.busy,
+  )
+  const formulaDraftRef = useRef<{sheetId: string; cell: string; value: string} | null>(null)
+  const cellCommitRef = useRef<Promise<void>>(Promise.resolve())
   const manualRangeRef = useRef(false)
   const univerEditorRef = useRef<UniverEditorBridge | null>(null)
   // In-app clipboard: the copied cell block (formulas + styles) plus the TSV
@@ -284,54 +306,50 @@ export function PureSheetsShell({
   // to the OLD path first.
   const boundPathRef = useRef<string | null>(null)
   const boundDocRef = useRef(document)
-  const lastPathRef = useRef<string | null | undefined>(undefined)
   // New workbooks are `.sheets` package folders; legacy flat `.sheets` /
   // `.sheets.html` files opened from disk stay single files. The package
   // suffix collides with the legacy flat suffix, so package-ness can't be
   // read from the path — it's tracked explicitly (set at bind/open time).
-  const boundIsPackageRef = useRef(false)
+  const boundIsPackageRef = useRef(true)
   const [switcherOpen, setSwitcherOpen] = useState(false)
   const [titleDraft, setTitleDraft] = useState<string | null>(null)
-  const savedWorkbookPayloadRef = useRef<{ name: string | null; content: string } | null>(null)
-  // A slow restored file must not replace a newer open or an explicit New.
-  const openGenerationRef = useRef(0)
-  useEffect(() => () => { openGenerationRef.current += 1 }, [])
+  const savedWorkbookPayloadRef = useRef<{
+    name: string | null
+    content: string
+  } | null>(null)
+  const savingDocumentRef = useRef<PureSheetsDocument | null>(null)
+  const [transitions] = useState(() =>
+    createWorkbookTransitions(flushBeforeReplace, setSwitching),
+  )
+  const workbookVersion = transitions.version
+  useEffect(() => () => transitions.dispose(), [transitions])
 
   const lifecycle = useDocumentLifecycle({
     appSlug: PURESHEETS_APP_SLUG,
     suffix: '.sheets',
     kind: 'package',
-    suggestedTitle: document.metadata.title,
+    suggestedTitle: () => documentRef.current.metadata.title,
     onSaved: files => {
-      const file = files.find(entry => entry.name === 'workbook.json') ?? files.find(entry => entry.name === null)
-      savedWorkbookPayloadRef.current = file && typeof file.content === 'string'
-        ? { name: file.name ?? null, content: file.content } : null
+      if (documentRef.current === savingDocumentRef.current)
+        setSaveState('saved')
+      const file =
+        files.find(entry => entry.name === 'workbook.json') ??
+        files.find(entry => entry.name === null)
+      savedWorkbookPayloadRef.current =
+        file && typeof file.content === 'string'
+          ? { name: file.name ?? null, content: file.content }
+          : null
     },
-    serialize: () =>
-      workbookFilesForSave(boundDocRef.current, {
+    serialize: () => {
+      savingDocumentRef.current = boundDocRef.current
+      return workbookFilesForSave(boundDocRef.current, {
         boundPath: boundPathRef.current,
         isPackage: boundIsPackageRef.current,
-      }),
+      })
+    },
   })
   const lifecycleRef = useRef(lifecycle)
-  useEffect(() => {
-    lifecycleRef.current = lifecycle
-  }, [lifecycle])
-
-  // Document switch (open, new workbook): flush the old file, then bind.
-  const boundTarget = filePath.trim() || null
-  useEffect(() => {
-    if (lastPathRef.current === boundTarget) return
-    lastPathRef.current = boundTarget
-    if (boundPathRef.current === boundTarget) return
-    const lifecycle = lifecycleRef.current
-    void lifecycle.flush().finally(() => {
-      boundPathRef.current = boundTarget
-      boundDocRef.current = documentRef.current
-      if (boundTarget) lifecycle.adopt(boundTarget)
-      else lifecycle.reset()
-    })
-  }, [boundTarget])
+  lifecycleRef.current = lifecycle
 
   // Lifecycle-owned path changes (lazy draft, promote, rename) → filePath.
   // These paths are always `.sheets` packages (drafts and their promotions).
@@ -340,7 +358,6 @@ export function PureSheetsShell({
     if (!path || boundPathRef.current === path) return
     boundIsPackageRef.current = true
     boundPathRef.current = path
-    lastPathRef.current = path
     setFilePath(path)
   }, [lifecycle.doc.path])
 
@@ -353,10 +370,13 @@ export function PureSheetsShell({
     lifecycleRef.current.markDirty()
   }, [document, filePath, saveState])
 
-  // Reflect completed lifecycle saves in the local save-state latch.
+  // Never let a previous savedAt turn a failed write into a success indication.
   useEffect(() => {
-    if (lifecycle.doc.savedAt && !lifecycle.doc.saving) setSaveState('saved')
-  }, [lifecycle.doc.savedAt, lifecycle.doc.saving])
+    if (lifecycle.doc.error) {
+      setSaveState('error')
+      setStatusMessage(lifecycle.doc.error)
+    }
+  }, [lifecycle.doc.error, setSaveState])
   // ---- end document lifecycle ----------------------------------------------
 
   const activeSheet = useMemo(() => {
@@ -400,61 +420,62 @@ export function PureSheetsShell({
   // `document` and `filePath` are always set together — never a real path
   // pointing at unloaded (blank) content.
   const openWorkbookPath = useCallback(
-    async (resourcePath: string): Promise<void> => {
-      const generation = ++openGenerationRef.current
-      let loaded: Awaited<ReturnType<typeof readWorkbookFromPath>>
-      try {
-        loaded = await readWorkbookFromPath(resourcePath, readTextFile)
-      } catch (error) {
-        if (generation !== openGenerationRef.current) return
-        throw error
-      }
-      if (generation !== openGenerationRef.current) return
-      boundIsPackageRef.current = loaded.isPackage
-      setDocument(loaded.document)
-      // Same-ID opens do not remount Univer. Explicitly reload its unit so
-      // the canvas receives the loaded bytes as well as the React controls.
-      setUniverSurfaceRevision(revision => revision + 1)
-      setUndoStack([])
-      setRedoStack([])
-      setFilePath(loaded.path)
-      setSelectedCell('A1')
-      manualRangeRef.current = false
-      setSelectedRange('A1:A1')
-      setTitleDraft(null)
-      // A recovered document is dirty on purpose: the next save rewrites
-      // the corrupt main file with the good backup contents.
-      setSaveState(loaded.recoveredFromBackup ? 'dirty' : 'saved')
-      setStatusMessage(
-        loaded.recoveredFromBackup
-          ? `The file was unreadable; recovered the last good save from ${
-              loaded.path.split(/[\\/]/).pop() ?? loaded.path
-            }.bak`
-          : `Opened ${loaded.path.split(/[\\/]/).pop() ?? loaded.path}`,
+    async (resourcePath: string): Promise<boolean> => {
+      setStatusMessage('Opening workbook…')
+      const opened = await transitions.run(
+        () => readWorkbookFromPath(resourcePath, readTextFile),
+        loaded => {
+          // The old source and file format have been saved before either changes.
+          lifecycleRef.current.adopt(loaded.path, {
+            title: loaded.document.metadata.title,
+          })
+          boundPathRef.current = loaded.path
+          boundDocRef.current = loaded.document
+          boundIsPackageRef.current = loaded.isPackage
+          savedWorkbookPayloadRef.current = null
+          setDocument(loaded.document)
+          setFilePath(loaded.path)
+          resetWorkbookView()
+          setSaveState(loaded.recoveredFromBackup ? 'dirty' : 'saved')
+          setStatusMessage(
+            loaded.recoveredFromBackup
+              ? `The file was unreadable; recovered the last good save from ${fileNameFromPath(
+                  loaded.path,
+                )}.bak`
+              : `Opened ${fileNameFromPath(loaded.path)}`,
+          )
+          const version = transitions.version
+          void (async () =>
+            updatePureSheetsSettings({ lastFilePath: loaded.path }))().catch(
+            error => {
+              if (transitions.version === version)
+                showToast(
+                  `Workbook opened; could not remember its location: ${String(
+                    error,
+                  )}`,
+                )
+            },
+          )
+        },
       )
-      await updatePureSheetsSettings({ lastFilePath: loaded.path })
+      return opened
     },
-    [],
+    [transitions, setDocument, setSaveState],
   )
 
-  useEffect(() => {
-    const path = resource?.path?.trim()
-    if (!path) return
-    let cancelled = false
-    void openWorkbookPath(path)
-      .catch(error => {
-        if (cancelled) return
-        setStatusMessage(error instanceof Error ? error.message : String(error))
-        setSaveState('error')
-      })
-      .finally(() => {
-        if (cancelled) return
-        onResourceHandled?.()
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [resource?.path, onResourceHandled, openWorkbookPath])
+  const resourceOpen = useWorkbookResourceOpen(
+    true,
+    resource?.path?.trim(),
+    async path => {
+      try {
+        return await openWorkbookPath(path)
+      } catch (error) {
+        reportFailure(error)
+        return false
+      }
+    },
+    onResourceHandled ?? (() => {}),
+  )
 
   useEffect(() => {
     setEditValue(activeSheet.cells[selectedCell]?.value ?? '')
@@ -533,12 +554,15 @@ export function PureSheetsShell({
     updater: (current: PureSheetsDocument) => PureSheetsDocument,
     message?: string,
   ): void {
+    if (transitions.busy)
+      throw Error('Wait for the workbook to finish opening before editing.')
     const current = documentRef.current
     const next = updater(current)
     if (next === current) return
     setUndoStack(stack => [...stack, current].slice(-50))
     setRedoStack([])
     setDocument(next)
+    boundDocRef.current = next
     setSaveState('dirty')
     if (message) setStatusMessage(message)
   }
@@ -548,6 +572,7 @@ export function PureSheetsShell({
   }
 
   function updateActiveSheet(nextSheet: WorkbookSheet, message?: string): void {
+    if (transitions.busy || workbookVersion !== transitions.version) return
     commitDocument(
       current => cloneWithUpdatedSheet(current, nextSheet),
       message,
@@ -558,6 +583,7 @@ export function PureSheetsShell({
     updater: (sheet: WorkbookSheet) => WorkbookSheet,
     message?: string,
   ): void {
+    if (transitions.busy || workbookVersion !== transitions.version) return
     commitDocument(current => {
       const currentSheet =
         current.workbook.sheets.find(
@@ -568,6 +594,7 @@ export function PureSheetsShell({
   }
 
   function commitCellValue(cell: string, value: string): void {
+    if (transitions.busy || workbookVersion !== transitions.version) return
     // Protection (Phase S3): refuse edits to locked cells on every surface —
     // the model would silently no-op, so tell the user why instead.
     if (isCellLocked(activeSheet, cell)) {
@@ -581,7 +608,7 @@ export function PureSheetsShell({
     const univerEditor = univerEditorRef.current
     if (univerEditor) {
       setEditValue(value)
-      void univerEditor
+      cellCommitRef.current = univerEditor
         .setCellValue(cell, value)
         .then(applied => {
           if (!applied) updateActiveSheet(upsertCell(activeSheet, cell, value))
@@ -608,6 +635,7 @@ export function PureSheetsShell({
       window.clearTimeout(formulaRangePickTimeoutRef.current)
       formulaRangePickTimeoutRef.current = undefined
     }
+    formulaDraftRef.current = null
     commitCellValue(selectedCell, value)
   }
 
@@ -618,7 +646,7 @@ export function PureSheetsShell({
   ): string {
     const selectedPosition = parseCellKey(cell)
     const normalizedRange = normalizeRangeToken(range) ?? range
-    const referencedCells = cellsInRange(normalizedRange)
+    const referencedCells = cellsInRange(normalizedRange, 2)
     if (exactRange) return normalizedRange
     if (
       !selectedPosition ||
@@ -669,8 +697,7 @@ export function PureSheetsShell({
       return `=VLOOKUP(${cell}, ${referenceRange}, 2, FALSE)`
     if (template === 'COUNTIF') return `=COUNTIF(${referenceRange}, ">0")`
     if (template === 'SUMIF') return `=SUMIF(${referenceRange}, ">0")`
-    if (template === 'AVERAGEIF')
-      return `=AVERAGEIF(${referenceRange}, ">0")`
+    if (template === 'AVERAGEIF') return `=AVERAGEIF(${referenceRange}, ">0")`
     if (template === 'RANK') return `=RANK(${cell}, ${referenceRange})`
     if (template === 'IFERROR') return `=IFERROR(${cell}, "")`
     if (template === 'TODAY') return '=TODAY()'
@@ -684,7 +711,7 @@ export function PureSheetsShell({
   function insertFormulaTemplate(template: FormulaTemplate): void {
     const range = activeRange()
     if (!range) return
-    const referencedCells = cellsInRange(range)
+    const referencedCells = cellsInRange(range, 2)
     if (
       ['SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'CONCAT'].includes(
         template,
@@ -730,6 +757,7 @@ export function PureSheetsShell({
   }
 
   function changeFormulaValue(value: string): void {
+    formulaDraftRef.current = {sheetId: activeSheet.id, cell: selectedCell, value}
     formulaRangePickRef.current = null
     if (formulaRangePickTimeoutRef.current) {
       window.clearTimeout(formulaRangePickTimeoutRef.current)
@@ -785,58 +813,123 @@ export function PureSheetsShell({
     })
   }
 
-  // Explicit save (⌘S, header Save): flush pending Univer edits into the
-  // document first (the editor's snapshot export is debounced ~250ms, so the
-  // freshest keystrokes may not have landed in React state yet), then flush
-  // the debounced autosave through the unified lifecycle.
-  async function save(): Promise<void> {
-    const lifecycle = lifecycleRef.current
-    setSaveState('saving')
-    // Snapshot bridge: Univer → snapshot → .sheets document. Fall back to the
-    // current React document when the surface is unavailable or the snapshot
-    // fails to convert — never block an explicit save.
-    let docToSave = documentRef.current
-    try {
-      const flushed = await univerEditorRef.current?.flushSnapshot()
-      if (flushed) {
-        docToSave = documentFromEditorSnapshot(flushed, documentRef.current)
-        setDocument(docToSave)
-      }
-    } catch {
-      docToSave = documentRef.current
-    }
-    if ((filePath.trim() || null) === boundPathRef.current) {
-      boundDocRef.current = docToSave
-    }
-    const path = await lifecycle.ensureDraft()
-    if (!path) {
-      setSaveState('error')
-      setStatusMessage(lifecycle.doc.error ?? 'Could not save the workbook.')
-      return
-    }
-    await lifecycle.flush()
-    setSaveState('saved')
-    setStatusMessage(
-      lifecycle.doc.status === 'draft'
-        ? 'Draft saved — name it to file it.'
-        : 'All changes saved.',
-    )
-    recordLedgerOperation({
-      lane: 'user',
-      kind: 'document.save',
-      summary: `Saved workbook "${docToSave.metadata.title || 'Untitled'}"`,
-      refs: { path },
-    })
+  function reportFailure(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error)
+    setStatusMessage(message)
+    showToast(message)
   }
 
-  // New workbook (⌘N, switcher): detach and reset — the next edit lazily
-  // creates a fresh draft in PureDrafts.
-  function newWorkbook(fresh = createBlankWorkbook()): void {
-    openGenerationRef.current += 1
+  /** Commit the actual editor, including a cell that has not received Enter yet. */
+  async function captureEditorWorkbook(): Promise<void> {
+    const version = transitions.version
+    await cellCommitRef.current
+    if (version !== transitions.version)
+      throw Error('The workbook changed while committing its cell.')
+    const editor = univerEditorRef.current
+    if (editor?.isCellEditing() && !(await editor.commitEditing()))
+      throw Error(
+        'The current cell could not be committed. Finish editing it before saving.',
+      )
+    const draft = formulaDraftRef.current
+    if (draft) {
+      const current = documentRef.current
+      const sheet = current.workbook.sheets.find(
+        sheet => sheet.id === draft.sheetId,
+      )
+      if (!sheet || current.workbook.activeSheetId !== draft.sheetId)
+        throw Error(
+          'The sheet changed while editing the formula. Return to its cell before saving.',
+        )
+      if (isCellLocked(sheet, draft.cell))
+        throw Error(
+          `${draft.cell} is protected — unlock it before saving this edit.`,
+        )
+      if (editor) {
+        if (!(await editor.setCellValue(draft.cell, draft.value)))
+          throw Error(
+            'The formula bar edit could not be committed. Try saving again.',
+          )
+      } else {
+        setDocument(
+          cloneWithUpdatedSheet(
+            current,
+            upsertCell(sheet, draft.cell, draft.value),
+          ),
+        )
+        setSaveState('dirty')
+      }
+      if (formulaDraftRef.current === draft) formulaDraftRef.current = null
+    }
+    if (!editor) return
+    const snapshot = await editor.flushSnapshot()
+    if (version !== transitions.version || editor !== univerEditorRef.current)
+      throw Error('The workbook changed while its editor was being saved.')
+    if (!snapshot)
+      throw Error(
+        'The editor could not provide the current workbook. Try saving again.',
+      )
+    importUniverSnapshot(snapshot)
+  }
+
+  async function flushBeforeReplace(): Promise<void> {
+    await captureEditorWorkbook()
+    boundDocRef.current = documentRef.current
+    // A clean restored file needs no forced write just to open another workbook.
+    if (saveStateRef.current !== 'saved' || lifecycleRef.current.doc.saving)
+      await persistWorkbook(documentRef.current)
+  }
+
+  async function persistWorkbook(
+    snapshot: PureSheetsDocument,
+  ): Promise<string> {
+    const version = transitions.version
+    const lifecycle = lifecycleRef.current
+    boundDocRef.current = snapshot
+    if (!boundPathRef.current) boundIsPackageRef.current = true
+    const path = await lifecycle.ensureDraft()
+    if (!path)
+      throw Error(lifecycle.doc.error ?? 'Could not create a workbook draft.')
+    if (documentRef.current !== snapshot || transitions.version !== version)
+      throw Error(
+        'The workbook changed while creating its draft. Save it again.',
+      )
+    boundPathRef.current = path
+    setFilePath(path)
+    await lifecycle.flush({ throwOnError: true })
+    if (documentRef.current !== snapshot || transitions.version !== version)
+      throw Error('New changes arrived while saving. Save the workbook again.')
+    return path
+  }
+
+  async function save(): Promise<void> {
+    if (transitions.busy) return
+    setSaveState('saving')
+    try {
+      await captureEditorWorkbook()
+      const snapshot = documentRef.current
+      const path = await persistWorkbook(snapshot)
+      setSaveState('saved')
+      setStatusMessage(
+        lifecycleRef.current.doc.status === 'draft'
+          ? 'Draft saved — name it to file it.'
+          : 'All changes saved.',
+      )
+      recordLedgerOperation({
+        lane: 'user',
+        kind: 'document.save',
+        summary: `Saved workbook "${snapshot.metadata.title || 'Untitled'}"`,
+        refs: { path },
+      })
+    } catch (error) {
+      setSaveState('error')
+      reportFailure(error)
+    }
+  }
+
+  function resetWorkbookView(): void {
     setSwitcherOpen(false)
-    // Detach; the next edit lazily creates a fresh `.sheets` package draft.
-    boundIsPackageRef.current = false
-    setDocument(fresh)
+    formulaDraftRef.current = null
+    cellCommitRef.current = Promise.resolve()
     refreshUniverSurface()
     setUndoStack([])
     setRedoStack([])
@@ -844,9 +937,33 @@ export function PureSheetsShell({
     manualRangeRef.current = false
     setSelectedRange('A1:A1')
     setTitleDraft(null)
-    setSaveState('saved')
+    setUniverSelection(null)
+    setImportWarnings(null)
+    copiedBlockRef.current = null
+    copiedTextRef.current = null
+    formulaRangePickRef.current = null
+    formulaRangeCommitRef.current = null
+    if (formulaRangePickTimeoutRef.current)
+      window.clearTimeout(formulaRangePickTimeoutRef.current)
+    if (formulaRangeCommitClearRef.current)
+      window.clearTimeout(formulaRangeCommitClearRef.current)
+  }
+
+  function installNewWorkbook(next: PureSheetsDocument): void {
+    lifecycleRef.current.reset()
+    boundPathRef.current = null
+    boundIsPackageRef.current = true
+    boundDocRef.current = next
+    savedWorkbookPayloadRef.current = null
+    setDocument(next)
     setFilePath('')
+    resetWorkbookView()
+    setSaveState('saved')
     setStatusMessage('New workbook')
+  }
+
+  async function newWorkbook(fresh = createBlankWorkbook()): Promise<boolean> {
+    return transitions.run(async () => fresh, installNewWorkbook)
   }
 
   // Commit the workbook title (the naming surface): store it in the document
@@ -875,10 +992,9 @@ export function PureSheetsShell({
 
   useDocumentHotkeys({
     onSave: () => void save(),
-    onNew: newWorkbook,
+    onNew: () => void newWorkbook().catch(reportFailure),
     onOpen: () => setSwitcherOpen(true),
   })
-
 
   // ⌘/Ctrl+D fill down, ⌘/Ctrl+R fill right. Skips text-entry targets and
   // events another handler (e.g. the Univer editor's own shortcuts) already
@@ -1693,9 +1809,14 @@ export function PureSheetsShell({
   }
 
   async function importCsvFile(): Promise<void> {
+    const version = transitions.version
     const path = await openImportFile()
     if (!path) return
     const text = await readTextFile(path)
+    if (version !== transitions.version)
+      throw Error(
+        'The workbook changed while the CSV was loading. Import it again.',
+      )
     const base =
       fileNameFromPath(path)
         .replace(/\.[^.]+$/, '')
@@ -1720,12 +1841,21 @@ export function PureSheetsShell({
   }
 
   async function exportCsvFile(): Promise<void> {
+    const version = transitions.version
+    const sheetId = activeSheet.id
     const path = await chooseSaveFilePath({
       defaultName: `${activeSheet.name || 'Sheet'}.csv`,
       filters: [{ name: 'CSV', extensions: ['csv'] }],
     })
     if (!path) return
-    await writeTextFile(path, csvFromSheet(activeSheet))
+    await captureEditorWorkbook()
+    if (version !== transitions.version)
+      throw Error('The workbook changed before export. Export it again.')
+    const sheet = documentRef.current.workbook.sheets.find(
+      sheet => sheet.id === sheetId,
+    )
+    if (!sheet) throw Error('The sheet was removed before export.')
+    await writeTextFile(path, csvFromSheet(sheet))
     setStatusMessage(
       `Exported ${activeSheet.name} to ${fileNameFromPath(path)}`,
     )
@@ -1738,39 +1868,36 @@ export function PureSheetsShell({
   }
 
   async function importXlsxFile(): Promise<void> {
+    const version = transitions.version
     const path = await openImportFile()
     if (!path) return
+    if (version !== transitions.version)
+      throw Error('The workbook changed while choosing an import. Try again.')
     if (!/\.xlsx$/i.test(path)) {
       setStatusMessage('Choose an .xlsx file to import')
       return
     }
-    setStatusMessage(`Importing ${fileNameFromPath(path)}…`)
-    const binary = await readBinaryFile(path, 30_000_000)
-    if (binary.truncated || !binary.base64) {
-      setStatusMessage(
-        'That workbook is too large to import (30 MB limit) or unreadable',
-      )
-      return
-    }
-    const imported = await importXlsxWorkbook(
-      base64ToBytes(binary.base64),
-      fileNameFromPath(path).replace(/\.xlsx$/i, '') || 'Imported workbook',
+    const applied = await transitions.run(
+      async () => {
+        setStatusMessage(`Importing ${fileNameFromPath(path)}…`)
+        const binary = await readBinaryFile(path, 30_000_000)
+        if (binary.truncated || !binary.base64)
+          throw Error(
+            'That workbook is too large to import (30 MB limit) or unreadable',
+          )
+        return importXlsxWorkbook(
+          base64ToBytes(binary.base64),
+          fileNameFromPath(path).replace(/\.xlsx$/i, '') || 'Imported workbook',
+        )
+      },
+      imported => {
+        installNewWorkbook(imported.document)
+        setSaveState('dirty')
+        setImportWarnings(imported.warnings)
+        setStatusMessage(`Imported ${fileNameFromPath(path)}`)
+      },
     )
-    // Imported content becomes a NEW workbook: detach from the current file
-    // so the next save lazily creates a fresh `.sheets` package draft.
-    boundIsPackageRef.current = false
-    setDocument(imported.document)
-    setUndoStack([])
-    setRedoStack([])
-    setFilePath('')
-    setSelectedCell('A1')
-    manualRangeRef.current = false
-    setSelectedRange('A1:A1')
-    setTitleDraft(null)
-    setSaveState('dirty')
-    setImportWarnings(imported.warnings)
-    setStatusMessage(`Imported ${fileNameFromPath(path)}`)
-    refreshUniverSurface()
+    if (!applied) return
     recordLedgerOperation({
       lane: 'user',
       kind: 'sheets.import.xlsx',
@@ -1780,18 +1907,16 @@ export function PureSheetsShell({
   }
 
   async function exportXlsxFile(): Promise<void> {
+    const version = transitions.version
     const path = await chooseSaveFilePath({
       defaultName: `${document.metadata.title || 'Workbook'}.xlsx`,
       filters: [{ name: 'Excel workbook', extensions: ['xlsx'] }],
     })
     if (!path) return
-    // Flush pending Univer edits so the export matches what is on screen.
-    const flushed = await univerEditorRef.current
-      ?.flushSnapshot()
-      .catch(() => null)
-    const docToExport = flushed
-      ? documentFromEditorSnapshot(flushed, documentRef.current)
-      : documentRef.current
+    await captureEditorWorkbook()
+    if (version !== transitions.version)
+      throw Error('The workbook changed before export. Export it again.')
+    const docToExport = documentRef.current
     const bytes = await exportXlsxWorkbook(docToExport)
     await writeBinaryFile(path, bytesToBase64(bytes))
     setStatusMessage(`Exported workbook to ${fileNameFromPath(path)}`)
@@ -2282,8 +2407,8 @@ export function PureSheetsShell({
   // very large selections (evaluating every formula would stall the UI).
   const rangeSummary = useMemo(() => {
     if (!normalizedRange) return null
-    const keys = cellsInRange(normalizedRange)
-    if (keys.length < 2 || keys.length > 20000) return null
+    const keys = cellsInRange(normalizedRange, 20000)
+    if (keys.length < 2) return null
     const numbers: number[] = []
     for (const key of keys) {
       const value = computedCellValue(activeSheet, key)
@@ -2333,8 +2458,13 @@ export function PureSheetsShell({
 
   return (
     <AppFrame
+      inert={switching || undefined}
+      aria-busy={switching}
       headerDocumentName={
-        document.metadata.title?.trim() || (lifecycle.doc.path ? lifecycle.doc.path.split(/[\\/]/).pop() : undefined)
+        document.metadata.title?.trim() ||
+        (lifecycle.doc.path
+          ? lifecycle.doc.path.split(/[\\/]/).pop()
+          : undefined)
       }
       headerActions={
         <DocumentHeaderActions
@@ -2345,6 +2475,11 @@ export function PureSheetsShell({
       }
     >
       {toast && <Toast role="status">{toast}</Toast>}
+      {resourceOpen.failed && (
+        <ToolTextButton type="button" onClick={resourceOpen.retry}>
+          Retry opening workbook
+        </ToolTextButton>
+      )}
       <Shell data-app="sheets">
         <DocumentSwitcher
           appSlug={PURESHEETS_APP_SLUG}
@@ -2355,14 +2490,9 @@ export function PureSheetsShell({
           onClose={() => setSwitcherOpen(false)}
           onOpenDocument={path => {
             setSwitcherOpen(false)
-            void openWorkbookPath(path).catch(error => {
-              setStatusMessage(
-                error instanceof Error ? error.message : String(error),
-              )
-              setSaveState('error')
-            })
+            void openWorkbookPath(path).catch(reportFailure)
           }}
-          onCreateNew={() => newWorkbook()}
+          onCreateNew={() => void newWorkbook().catch(reportFailure)}
           newLabel="New workbook"
           title="Open a workbook"
           itemNoun="workbook"

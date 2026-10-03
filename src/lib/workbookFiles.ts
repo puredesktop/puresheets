@@ -38,9 +38,8 @@ export async function readWorkbookFromPath(
     parse: (raw: string) => PureSheetsDocument,
     path: string,
   ): Promise<{ doc: PureSheetsDocument; recovered: boolean }> => {
-    const raw = await readTextFile(path)
     try {
-      return { doc: parse(raw), recovered: false }
+      return { doc: parse(await readTextFile(path)), recovered: false }
     } catch (parseError) {
       try {
         return {
@@ -61,18 +60,19 @@ export async function readWorkbookFromPath(
       path: clean,
     }
   }
-  if (clean.endsWith('.sheets')) {
+  if (/\.sheets$/i.test(clean)) {
+    let raw: string
     try {
-      const document = loadSheetsDocument(
-        await readTextFile(`${clean}/workbook.json`),
+      raw = await readTextFile(`${clean}/workbook.json`)
+    } catch (error) {
+      // Only an absent package member (or a flat file where a directory was
+      // probed) justifies trying the legacy flat format. Preserve real I/O errors.
+      if (
+        !/ENOENT|ENOTDIR|not a directory|no such file|not found|does not exist/i.test(
+          String(error),
+        )
       )
-      return {
-        document,
-        isPackage: true,
-        recoveredFromBackup: false,
-        path: clean,
-      }
-    } catch {
+        throw error
       const result = await readFlatWithRecovery(loadSheetsDocument, clean)
       return {
         document: result.doc,
@@ -80,6 +80,12 @@ export async function readWorkbookFromPath(
         recoveredFromBackup: result.recovered,
         path: clean,
       }
+    }
+    return {
+      document: loadSheetsDocument(raw),
+      isPackage: true,
+      recoveredFromBackup: false,
+      path: clean,
     }
   }
   const result = await readFlatWithRecovery(loadSheetsDocument, clean)

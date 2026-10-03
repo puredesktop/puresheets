@@ -114,6 +114,11 @@ const BottomBar = styled.footer`
   border-top: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
   padding: 6px var(--pure-chrome-inset);
+
+  @media (max-width: 720px) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
 `
 
 const SheetTabs = styled.div`
@@ -132,7 +137,8 @@ const SheetTab = styled.button<{ $active?: boolean }>`
      inactive tabs stay quiet and muted so the current sheet is obvious. */
   height: var(--pure-chrome-control-height);
   border: 1px solid
-    ${({ $active }) => ($active ? 'var(--sheets-accent)' : 'var(--pure-chrome-line)')};
+    ${({ $active }) =>
+      $active ? 'var(--sheets-accent)' : 'var(--pure-chrome-line)'};
   border-bottom-width: ${({ $active }) => ($active ? '3px' : '1px')};
   border-radius: 0;
   background: ${({ $active }) =>
@@ -161,4 +167,14 @@ const AddSheetButton = styled(IconButton)`
 `
 
 /* Family status-line convention: meta, 11px mono in the muted colour. */
-const Status = styled(MetaText)``
+const Status = styled(MetaText)`
+  min-width: 0;
+  max-width: min(45vw, 520px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  @media (max-width: 720px) {
+    max-width: none;
+  }
+`

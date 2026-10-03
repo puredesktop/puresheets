@@ -181,9 +181,11 @@ export function normalizeRangeToken(rangeToken: string): string | null {
     : null
 }
 
-export function cellsInRange(rangeToken: string): string[] {
+export function cellsInRange(rangeToken: string, maxCells = Infinity): string[] {
   const bounds = parseRange(rangeToken)
   if (!bounds) return []
+  const count = (bounds.end.row - bounds.start.row + 1) * (bounds.end.column - bounds.start.column + 1)
+  if (!Number.isSafeInteger(count) || count > maxCells) return []
   const keys: string[] = []
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
     for (
