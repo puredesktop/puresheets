@@ -146,6 +146,7 @@ export function UniverSpreadsheetSurface({
     const host = hostRef.current
     if (!host || !snapshot || import.meta.env.MODE === 'test') return
     let disposed = false
+    let unitGeneration = 0
     let disposeUniver: (() => void) | undefined
     let snapshotTimeout: number | undefined
     // A programmatic reload replays the whole workbook into the live Univer
@@ -561,18 +562,20 @@ export function UniverSpreadsheetSurface({
       const exportSnapshotAfterBridgeEdit = async (
         worksheet: UniverFacadeWorksheet,
       ): Promise<boolean> => {
+        const generation = unitGeneration
         beginBridgeExport()
         try {
           await univerApi
             .getFormula?.()
             .onCalculationResultApplied?.(1000)
             .catch(() => undefined)
+          if (disposed || generation !== unitGeneration) return false
           const nextSnapshot = saveFromUniver()
           if (nextSnapshot) onSnapshotChange(nextSnapshot)
           syncSelectionFromUniver(worksheet, undefined, true)
           return Boolean(nextSnapshot)
         } finally {
-          suppressCommandExport = false
+          if (generation === unitGeneration) suppressCommandExport = false
         }
       }
       const exportWorkbookAfterBridgeEdit = async (
@@ -584,6 +587,7 @@ export function UniverSpreadsheetSurface({
         // feel like the app froze (#273 follow-up).
         waitForRecalc = true,
       ): Promise<boolean> => {
+        const generation = unitGeneration
         beginBridgeExport()
         try {
           if (waitForRecalc) {
@@ -592,6 +596,7 @@ export function UniverSpreadsheetSurface({
               .onCalculationResultApplied?.(1000)
               .catch(() => undefined)
           }
+          if (disposed || generation !== unitGeneration) return false
           const nextSnapshot = snapshotWithActiveSheet(
             workbook.save(),
             workbook,
@@ -604,7 +609,7 @@ export function UniverSpreadsheetSurface({
           )
           return Boolean(nextSnapshot)
         } finally {
-          suppressCommandExport = false
+          if (generation === unitGeneration) suppressCommandExport = false
         }
       }
       const editActiveWorksheet = async (
@@ -641,7 +646,7 @@ export function UniverSpreadsheetSurface({
         }>,
         preserveRange = false,
       ): void => {
-        if (!worksheet) return
+        if (disposed || !worksheet) return
         const activeSelection = worksheet.getSelection?.()
         const currentCell = activeSelection?.getCurrentCell?.()
         let selectedRangeFromUniver: UniverRangeLike | undefined
@@ -703,6 +708,7 @@ export function UniverSpreadsheetSurface({
         },
         applyRangeStyle: async (rangeToken, patch) => {
           if (disposed) return false
+          const generation = unitGeneration
           const workbook = univerApi.getActiveWorkbook?.() ?? null
           // Commit any open in-cell edit first: applying a style while the user
           // is mid-typing would otherwise export the cell's *committed* (often
@@ -710,6 +716,7 @@ export function UniverSpreadsheetSurface({
           if (workbook?.isCellEditing?.()) {
             await workbook.endEditingAsync?.(true).catch(() => undefined)
           }
+          if (disposed || generation !== unitGeneration) return false
           const worksheet = workbook?.getActiveSheet?.() ?? null
           const range = worksheet?.getRange?.(rangeToken)
           if (!worksheet || !range) return false
@@ -896,10 +903,12 @@ export function UniverSpreadsheetSurface({
         },
         flushSnapshot: async () => {
           if (disposed) return null
+          const generation = unitGeneration
           await univerApi
             .getFormula?.()
             .onCalculationResultApplied?.(1000)
             .catch(() => undefined)
+          if (disposed || generation !== unitGeneration) return null
           const nextSnapshot = saveFromUniver()
           if (nextSnapshot) onSnapshotChange(nextSnapshot)
           return nextSnapshot
@@ -1043,7 +1052,7 @@ export function UniverSpreadsheetSurface({
           .getFormula?.()
           .onCalculationResultApplied?.(1000)
         const lift = (): void => {
-          if (token !== suppressToken) return // a newer reload owns suppression
+          if (disposed || token !== suppressToken) return // a newer reload owns suppression
           suppressExport = false
         }
         if (settle) {
@@ -1054,7 +1063,7 @@ export function UniverSpreadsheetSurface({
         }
       }
       const commandDisposable = univerApi.onCommandExecuted?.(command => {
-        if (!readyForChanges) return
+        if (disposed || !readyForChanges) return
         const commandId = command?.id ?? ''
         // A canvas copy/cut (Ctrl+C / Ctrl+X) is handled entirely by Univer and
         // never reaches our Copy button, so the shell's internal clipboard —
@@ -1121,7 +1130,7 @@ export function UniverSpreadsheetSurface({
             .getFormula?.()
             .onCalculationResultApplied?.(1000)
           const close = (): void => {
-            if (myToken !== editToken) return
+            if (disposed || myToken !== editToken) return
             editOpen = false
             recordedThisEdit = false
           }
@@ -1175,6 +1184,11 @@ export function UniverSpreadsheetSurface({
       const reloadUnit = (): void => {
         const nextSnapshot = lastSnapshotRef.current
         if (disposed || !nextSnapshot) return
+        unitGeneration++
+        editToken++
+        editOpen = false
+        recordedThisEdit = false
+        suppressCommandExport = false
         // Capture the live view state first: a recreated unit resets to the
         // first sheet with A1:A1 selected and the viewport scrolled to the
         // top-left (the generated snapshot carries no selection and zeroed
@@ -1259,6 +1273,7 @@ export function UniverSpreadsheetSurface({
 
     return () => {
       disposed = true
+      unitGeneration++
       onEditorReady(null)
       disposeUniver?.()
     }

@@ -280,7 +280,7 @@ export function FormulaBar({
 
 const Bar = styled.div`
   display: grid;
-  grid-template-columns: 76px 132px minmax(0, 1fr) minmax(120px, 220px) auto;
+  grid-template-columns: 76px 132px minmax(0, 1fr) minmax(120px, 220px);
   gap: 8px;
   align-items: center;
   padding: 6px var(--pure-chrome-inset);
@@ -288,7 +288,7 @@ const Bar = styled.div`
   background: var(--pure-chrome-bar);
 
   @media (max-width: 720px) {
-    grid-template-columns: 64px minmax(96px, 128px) minmax(160px, 1fr) auto;
+    grid-template-columns: 56px 96px minmax(0, 1fr);
   }
 `
 
@@ -310,15 +310,19 @@ const FormulaStack = styled.div`
 `
 
 const FormulaInput = styled.input.attrs(fieldChrome)<{ $mirrored?: boolean }>`
-  border-radius: 0;
-  background: ${({ $mirrored }) =>
-    $mirrored ? 'transparent' : 'var(--pure-chrome-surface)'};
-  color: ${({ $mirrored }) => ($mirrored ? 'transparent' : 'var(--sheets-ink)')};
-  caret-color: var(--sheets-ink);
-  font-family: var(--sheets-mono);
-  font-size: var(--pure-chrome-ui-size);
-  position: relative;
-  z-index: 1;
+  /* Outrank the shared field rule regardless of stylesheet injection order. */
+  && {
+    border-radius: 0;
+    background: ${({ $mirrored }) =>
+      $mirrored ? 'transparent' : 'var(--pure-chrome-surface)'};
+    color: ${({ $mirrored }) =>
+      $mirrored ? 'transparent' : 'var(--sheets-ink)'};
+    caret-color: var(--sheets-ink);
+    font-family: var(--sheets-mono);
+    font-size: var(--pure-chrome-ui-size);
+    position: relative;
+    z-index: 1;
+  }
 
   &::selection {
     background: color-mix(in srgb, var(--pure-chrome-accent) 24%, transparent);
