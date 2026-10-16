@@ -48,6 +48,22 @@
     "agents": {
       "tools": [
         {
+          "name": "openWorkbook",
+          "description": "Open an existing .sheets/.sheets.html workbook or import an .xlsx from an exact selected path. Use before auditing a spreadsheet supplied by the user; do not audit a blank restored workbook instead. Flushes current edits before switching. Excel imports create a separate native workbook and preserve the original Excel file. Returns actual sheet title, source path and import warnings; read getSheetsContext and readRange next. Call completeWorkbook after any changes to save a separate deliverable.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
           "name": "autoFitRows",
           "description": "Fit row heights using the live spreadsheet renderer after setting content, fonts and column widths. Enables text wrapping across the specified whole rows. Use for prose tables before completeWorkbook to avoid clipped text; not a content-quality check. Refused on protected sheets or when the renderer is unavailable.",
           "inputSchema": {
@@ -427,6 +443,9 @@
           "requiresApproval": true
         }
       ]
-    }
+    },
+    "openableExtensions": [
+      "xlsx"
+    ]
   }
 }

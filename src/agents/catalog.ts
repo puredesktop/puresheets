@@ -4,6 +4,7 @@ import type { PureSheetsDocument } from '../types'
 export const PURESHEETS_AGENT_TOOL_NAMES = [
   'getSheetsContext',
   'createWorkbook',
+  'openWorkbook',
   'autoFitRows',
   'completeWorkbook',
   'readRange',
@@ -43,6 +44,7 @@ export interface SheetsAgentToolContext {
   currentFilePath?: () => string
   filePath: string
   selectedRange: string
+  openWorkbook?: (path: string) => Promise<{ title: string; sourcePath: string; filePath: string | null; warnings: string[] }>
   createWorkbook?: (title: string) => Promise<{ title: string; filePath: null }>
   autoFitRows?: (sheetId: string, rows: number[]) => Promise<boolean>
   completeWorkbook?: () => Promise<{ taskOutcome: string; artifactPaths: string[]; observations: string[] }>

@@ -1,3 +1,4 @@
+import ExcelJS from 'exceljs'
 // @vitest-environment happy-dom
 import { act } from 'react'
 import type React from 'react'
@@ -138,6 +139,32 @@ function lastSavedContent(): string {
 }
 
 describe('agent workbook completion integration', () => {
+  it('opens a selected Excel path through the agent pipeline, keeping its source untouched', async () => {
+    const excel = new ExcelJS.Workbook()
+    excel.addWorksheet('Evidence').addRows([['Item','Complete'],['A',true]])
+    excel.addWorksheet('Budget').addRows([['Amount'],[120]])
+    const bytes = await excel.xlsx.writeBuffer()
+    readBinaryFile.mockResolvedValue({base64:Buffer.from(bytes).toString('base64'),truncated:false})
+    render(<PureSheetsShell initialDocument={createBlankWorkbook('Unrelated restored workbook')} />)
+    await act(async () => { await flushAsync() })
+    let receipt: Awaited<ReturnType<NonNullable<SheetsAgentToolContext['openWorkbook']>>> | undefined
+    await act(async () => { receipt = await agentContext.openWorkbook!('C:\\Work\\audit.xlsx'); await flushAsync() })
+    expect(receipt).toMatchObject({title:'audit',sourcePath:'C:\\Work\\audit.xlsx',filePath:null})
+    expect(agentContext.document?.workbook.sheets.map(sheet=>sheet.name)).toEqual(['Evidence','Budget'])
+    expect(readBinaryFile).toHaveBeenCalledWith('C:\\Work\\audit.xlsx',30_000_000)
+    expect(writeTextFile.mock.calls.every(([path])=>path!=='C:\\Work\\audit.xlsx')).toBe(true)
+  })
+  it('imports an Excel resource before acknowledging the host open request', async () => {
+    const excel = new ExcelJS.Workbook(); excel.addWorksheet('Imported').addRows([['Name'],['Ada']])
+    const bytes=await excel.xlsx.writeBuffer()
+    readBinaryFile.mockResolvedValue({base64:Buffer.from(bytes).toString('base64'),truncated:false})
+    const handled=vi.fn()
+    render(<PureSheetsShell initialDocument={createBlankWorkbook()} resource={{path:'/work/selected.xlsx'}} onResourceHandled={handled}/>)
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));await flushAsync()})
+    expect(agentContext.document?.workbook.sheets[0]?.name).toBe('Imported')
+    expect(handled).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the latest explicit open when an older read finishes afterward', async () => {
     let finishOld!: (value: string) => void
     const old = createBlankWorkbook('Slow old file')

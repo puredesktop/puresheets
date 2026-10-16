@@ -211,6 +211,7 @@ export function PureSheetsShell({
   const [matchCase, setMatchCase] = useState(false)
   const [commentBarOpen, setCommentBarOpen] = useState(false)
   const [importWarnings, setImportWarnings] = useState<string[] | null>(null)
+  const importWarningsRef = useRef<string[]>([])
   const [renamingSheetId, setRenamingSheetId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [agentActivityOpen, setAgentActivityOpen] = useState(false)
@@ -235,6 +236,10 @@ export function PureSheetsShell({
       selectedRange,
       autoFitRows: async (sheetId, rows) =>
         (await univerEditorRef.current?.autoFitRows(sheetId, rows)) ?? false,
+      openWorkbook: async path => {
+        if (!await openWorkbookPath(path)) throw Error('A newer workbook request superseded this open. Try again.')
+        return { title: documentRef.current.metadata.title, sourcePath: path, filePath: boundPathRef.current ?? null, warnings: importWarningsRef.current }
+      },
       createWorkbook: async title => {
         const fresh = createBlankWorkbook(title)
         if (!(await newWorkbook(fresh)))
@@ -421,10 +426,13 @@ export function PureSheetsShell({
   // pointing at unloaded (blank) content.
   const openWorkbookPath = useCallback(
     async (resourcePath: string): Promise<boolean> => {
+      if (/\.xlsx$/i.test(resourcePath)) return importXlsxPath(resourcePath)
       setStatusMessage('Opening workbook…')
       const opened = await transitions.run(
         () => readWorkbookFromPath(resourcePath, readTextFile),
         loaded => {
+          importWarningsRef.current = []
+          setImportWarnings(null)
           // The old source and file format have been saved before either changes.
           lifecycleRef.current.adopt(loaded.path, {
             title: loaded.document.metadata.title,
@@ -950,6 +958,8 @@ export function PureSheetsShell({
   }
 
   function installNewWorkbook(next: PureSheetsDocument): void {
+    importWarningsRef.current = []
+    setImportWarnings(null)
     lifecycleRef.current.reset()
     boundPathRef.current = null
     boundIsPackageRef.current = true
@@ -1871,12 +1881,12 @@ export function PureSheetsShell({
     const version = transitions.version
     const path = await openImportFile()
     if (!path) return
-    if (version !== transitions.version)
-      throw Error('The workbook changed while choosing an import. Try again.')
-    if (!/\.xlsx$/i.test(path)) {
-      setStatusMessage('Choose an .xlsx file to import')
-      return
-    }
+    if (version !== transitions.version) throw Error('The workbook changed while choosing an import. Try again.')
+    await importXlsxPath(path)
+  }
+
+  async function importXlsxPath(path: string): Promise<boolean> {
+    if (!/\.xlsx$/i.test(path)) throw Error('Choose an .xlsx file to import.')
     const applied = await transitions.run(
       async () => {
         setStatusMessage(`Importing ${fileNameFromPath(path)}…`)
@@ -1893,17 +1903,19 @@ export function PureSheetsShell({
       imported => {
         installNewWorkbook(imported.document)
         setSaveState('dirty')
+        importWarningsRef.current = imported.warnings
         setImportWarnings(imported.warnings)
         setStatusMessage(`Imported ${fileNameFromPath(path)}`)
       },
     )
-    if (!applied) return
+    if (!applied) return false
     recordLedgerOperation({
       lane: 'user',
       kind: 'sheets.import.xlsx',
       summary: `Imported XLSX workbook ${fileNameFromPath(path)}`,
       refs: { path },
     })
+    return true
   }
 
   async function exportXlsxFile(): Promise<void> {

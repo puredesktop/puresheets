@@ -39,9 +39,10 @@ export async function importXlsxWorkbook(
 ): Promise<XlsxImportResult> {
   const workbook = new ExcelJS.Workbook()
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
-  await workbook.xlsx.load(bytes.buffer as ArrayBuffer)
+  await workbook.xlsx.load(bytes.slice().buffer as ArrayBuffer)
   const warnings: string[] = []
   const sheets: WorkbookSheet[] = []
+  let importedCells = 0
   let flattenedRichText = 0
   let flattenedHyperlinks = 0
 
@@ -54,6 +55,7 @@ export async function importXlsxWorkbook(
 
     worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
       row.eachCell({ includeEmpty: false }, (cell, columnNumber) => {
+        if (++importedCells > 250_000) throw new Error('This workbook exceeds the 250,000 populated-cell import limit. Import a smaller workbook or split it by sheet.')
         const mapped = mapXlsxCell(cell)
         if (!mapped) return
         if (mapped.richText) flattenedRichText += 1

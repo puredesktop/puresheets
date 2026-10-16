@@ -48,6 +48,13 @@ export function useSheetsAgentTools(
         throw new AgentSheetsToolError('Workbook creation is unavailable.')
       return { content: formatAgentToolJson(await create(title.trim())) }
     },
+    openWorkbook: async invoke => {
+      const path = invoke.arguments?.path
+      if (typeof path !== 'string' || !path.trim()) throw new AgentSheetsToolError('Provide the selected workbook path.')
+      const open = contextRef.current.openWorkbook
+      if (!open) throw new AgentSheetsToolError('Workbook opening is unavailable.')
+      return { content: formatAgentToolJson(await open(path.trim())) }
+    },
     completeWorkbook: async () => {
       const complete = contextRef.current.completeWorkbook
       if (!complete)
@@ -95,6 +102,7 @@ export function useSheetsAgentTools(
               'listSheetChanges',
               'getExchangeRate',
               'createWorkbook',
+              'openWorkbook',
             ].includes(name) &&
             !mayChangeRef.current()
           )

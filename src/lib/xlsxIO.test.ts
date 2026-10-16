@@ -186,3 +186,11 @@ describe('base64 helpers', () => {
     )
   })
 })
+
+it('imports only the selected byte slice rather than unrelated bytes in its backing buffer', async () => {
+  const bytes=await buildFixtureXlsx()
+  const padded=new Uint8Array(bytes.length+20)
+  padded.fill(255);padded.set(bytes,10)
+  const result=await importXlsxWorkbook(padded.subarray(10,10+bytes.length),'Slice')
+  expect(result.document.workbook.sheets[0].name).toBe('Budget')
+})
