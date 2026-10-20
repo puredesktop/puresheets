@@ -129,6 +129,7 @@ import { ChartPanel, type ChartUpdatePatch } from './ChartPanel'
 import { FormulaBar } from './FormulaBar'
 import { SheetTabsBar } from './SheetTabsBar'
 import { UniverSpreadsheetSurface } from './UniverSpreadsheetSurface'
+import { workbookAgentRefs } from '../agentRefs'
 import type {
   UniverEditorBridge,
   UniverPasteValue,
@@ -2668,6 +2669,7 @@ export function PureSheetsShell({
             <SheetColumn>
               <GridScroller
                 data-testid="univer-spreadsheet-surface"
+                {...workbookAgentRefs(filePath, document.metadata.title, activeSheet)}
                 onPointerDownCapture={resetManualRangeTracking}
               >
                 <UniverSpreadsheetSurface
