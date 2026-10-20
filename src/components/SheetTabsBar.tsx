@@ -5,6 +5,7 @@ import { PlatformIcon } from '@purescience/platform-ui/components/chrome/Platfor
 import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
 import { IconButton, ToolIconButton } from './controls'
 import type { WorkbookSheet } from '../types'
+import { sheetAgentRefs } from '../agentRefs'
 
 /**
  * Bottom bar: sheet tabs (add, select, rename inline) plus sheet actions and
@@ -56,6 +57,7 @@ export function SheetTabsBar({
         {sheets.map(sheet => (
           <SheetTab
             key={sheet.id}
+            {...sheetAgentRefs(sheet)}
             $active={sheet.id === activeSheetId}
             aria-current={sheet.id === activeSheetId ? 'true' : undefined}
             title={`${sheet.name} — double-click to rename`}
