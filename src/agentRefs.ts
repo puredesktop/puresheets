@@ -31,7 +31,10 @@ export function sheetAgentRefs(sheet: { id: string; name: string }): AgentRefAtt
   return { 'data-agent-ref': sheetRefs(sheet).join(' '), 'data-agent-label': sheet.name }
 }
 
-/** The workbook's grid: the bound file path (plain, `path:`, `filePath:`) plus the sheet it is showing. */
+/**
+ * The workbook's grid: the bound file path (plain, `path:`, `filePath:`) plus the sheet it is showing, plus `@open`,
+ * which marks it as the open surface (a write call that names no tagged item is drawn here).
+ */
 export function workbookAgentRefs(
   filePath: string,
   title: string,
@@ -40,6 +43,7 @@ export function workbookAgentRefs(
   const refs: string[] = []
   if (usable(filePath)) refs.push(filePath, `path:${filePath}`, `filePath:${filePath}`)
   if (activeSheet) refs.push(...sheetRefs(activeSheet))
+  refs.push('@open')
   return {
     'data-agent-ref': refs.join(' '),
     'data-agent-label': activeSheet ? `${title || 'Workbook'} — ${activeSheet.name}` : title || 'Workbook',
