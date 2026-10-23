@@ -12,6 +12,7 @@ import {
 import type { UniverEditorBridge } from './univerBridgeTypes'
 import { createBlankWorkbook } from '../lib/workbookModel'
 import { PureSheetsShell } from './PureSheetsShell'
+import { updateCurrentWorkspaceTab } from '@purescience/platform-ui/bridge/workspace'
 import type { SheetsAgentToolContext } from '../agents/catalog'
 
 let agentContext: SheetsAgentToolContext
@@ -71,6 +72,9 @@ vi.mock('@purescience/platform-ui/bridge/documents.mjs', () => ({
   touchPlatformRecentDocument: vi.fn(async () => undefined),
   suggestPlatformDocumentLocation: vi.fn(async () => ({ dir: '/workspace' })),
 }))
+
+// The tab binding (useWorkspaceDocumentBinding) talks to the desktop; here there is none, so it answers at once.
+vi.mock('@purescience/platform-ui/bridge/workspace', () => ({ updateCurrentWorkspaceTab: vi.fn(async () => ({ updated: true })) }))
 
 vi.mock('../bridge/platformBridge', () => ({
   readBinaryFile: (...args: unknown[]) => readBinaryFile(...args),
@@ -2079,5 +2083,33 @@ describe('workbook persistence audit regressions', () => {
     expect(agentContext.document?.metadata.title).toBe('Retry worked')
     expect(createPlatformDraft).not.toHaveBeenCalled()
     expect(autosavePlatformDocument).not.toHaveBeenCalled()
+  })
+})
+
+describe('files the desk hands over', () => {
+  it('binds the opened workbook to its tab, so the desk and Share know which document is in front', async () => {
+    readTextFile.mockImplementation(async () => JSON.stringify(createBlankWorkbook('Bound')))
+    render(
+      <PureSheetsShell initialDocument={createBlankWorkbook()} resource={{ path: '/docs/Bound.sheets' }} />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    expect(agentContext.document?.metadata.title).toBe('Bound')
+    expect(vi.mocked(updateCurrentWorkspaceTab)).toHaveBeenCalledWith({ resource: { path: '/docs/Bound.sheets' } })
+  })
+
+  it('opens a CSV as a new workbook of one sheet, not as workbook JSON', async () => {
+    readTextFile.mockImplementation(async () => 'Item,Cost\nTea,3\n')
+    render(
+      <PureSheetsShell initialDocument={createBlankWorkbook()} resource={{ path: '/shared/Budget.csv' }} />,
+    )
+    await act(async () => {
+      await flushAsync()
+    })
+    expect(agentContext.document?.metadata.title).toBe('Budget')
+    expect(agentContext.document?.workbook.sheets.map(sheet => sheet.name)).toEqual(['Budget'])
+    expect(agentContext.document?.workbook.sheets[0]?.cells.B2?.value).toBe('3')
+    expect(document.body.textContent).toContain('Imported Budget.csv')
   })
 })

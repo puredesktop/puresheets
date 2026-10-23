@@ -193,4 +193,4 @@ for the PureAssistant tab.
 
 ### Excel ingestion
 
-When a user supplies an Excel path, call `openWorkbook` with that exact path before reading or auditing. It imports `.xlsx` into a new native workbook without changing the source. Surface import warnings (including lost features) before making claims about coverage. Use `getSheetsContext` to inventory all worksheets and `readRange` for bounded inspection. Never infer the file was loaded from a path in a prompt. Saving the result uses `completeWorkbook`, not the original Excel path.
+When a user supplies an Excel path, call `openWorkbook` with that exact path before reading or auditing. It imports `.xlsx` into a new native workbook without changing the source; a `.csv` or `.tsv` path opens the same way, as a new workbook of one sheet named after the file. Surface import warnings (including lost features) before making claims about coverage. Use `getSheetsContext` to inventory all worksheets and `readRange` for bounded inspection. Never infer the file was loaded from a path in a prompt. Saving the result uses `completeWorkbook`, not the original Excel path.

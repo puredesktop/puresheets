@@ -2,12 +2,13 @@ import {
   cellKey,
   computedCellValue,
   createBlankSheet,
+  createBlankWorkbook,
   normalizeRangeToken,
   parseCellKey,
   upsertCell,
 } from './workbookModel'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
-import type { WorkbookSheet } from '../types'
+import type { PureSheetsDocument, WorkbookSheet } from '../types'
 
 /**
  * CSV import/export (Phase S4). RFC 4180-style parsing: quoted fields,
@@ -194,4 +195,20 @@ export function csvFromSheet(
     rows.push(values)
   }
   return `${toCsv(rows)}\n`
+}
+
+/** A `.csv` or `.tsv` path: delimited text, opened as a workbook of one sheet, never read as workbook JSON. */
+export function isDelimitedTextPath(path: string): boolean {
+  return /\.(csv|tsv)$/i.test(path.trim())
+}
+
+/**
+ * A whole workbook from one delimited-text file, as opening a CSV as a document makes it: one sheet named after
+ * the file (its name without the suffix), and the workbook titled the same.
+ */
+export function workbookFromCsv(text: string, fileName: string): PureSheetsDocument {
+  const base = fileName.replace(/\.[^.]+$/, '').trim() || 'Imported'
+  const sheet = sheetFromCsv(text, 'sheet-1', base)
+  const workbook = createBlankWorkbook(base)
+  return { ...workbook, workbook: { activeSheetId: sheet.id, sheets: [sheet] } }
 }
