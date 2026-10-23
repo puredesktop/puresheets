@@ -7,9 +7,11 @@ import { describe, expect, it } from 'vitest'
 import {
   csvFromSheet,
   detectCsvDelimiter,
+  isDelimitedTextPath,
   parseCsv,
   sheetFromCsv,
   toCsv,
+  workbookFromCsv,
 } from './csv'
 import { createBlankWorkbook, upsertCell } from './workbookModel'
 
@@ -113,5 +115,25 @@ describe('sheetFromCsv / csvFromSheet', () => {
     const original = 'a,b\n"1,5",2\nx,"y""z"'
     const sheet = sheetFromCsv(original, 's1', 'RT')
     expect(csvFromSheet(sheet, 'A1:B3')).toBe(`${original}\n`)
+  })
+})
+
+describe('workbookFromCsv', () => {
+  it('opens a CSV as a workbook of one sheet named after the file', () => {
+    const doc = workbookFromCsv('Item,Cost\nTea,3\n', 'Budget.csv')
+    expect(doc.app).toBe('PureSheets')
+    expect(doc.metadata.title).toBe('Budget')
+    expect(doc.workbook.sheets).toHaveLength(1)
+    expect(doc.workbook.sheets[0].name).toBe('Budget')
+    expect(doc.workbook.activeSheetId).toBe(doc.workbook.sheets[0].id)
+    expect(doc.workbook.sheets[0].cells.A1?.value).toBe('Item')
+    expect(doc.workbook.sheets[0].cells.B2).toEqual({ value: '3', kind: 'number', style: undefined })
+  })
+
+  it('tells delimited text paths from workbook files', () => {
+    expect(isDelimitedTextPath('/docs/Budget.csv')).toBe(true)
+    expect(isDelimitedTextPath('/docs/Budget.TSV')).toBe(true)
+    expect(isDelimitedTextPath('/docs/Budget.sheets')).toBe(false)
+    expect(isDelimitedTextPath('/docs/Budget.sheets.html')).toBe(false)
   })
 })

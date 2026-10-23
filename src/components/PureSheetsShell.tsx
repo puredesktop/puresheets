@@ -4,6 +4,7 @@ import type React from 'react'
 import styled from 'styled-components'
 import { createWorkbookTransitions } from '../lib/workbookTransitions'
 import { useWorkbookResourceOpen } from '../hooks/useWorkbookResourceOpen'
+import { useWorkspaceDocumentBinding } from '../hooks/useWorkspaceDocumentBinding'
 import { useSheetsAgentTools } from '../hooks/useSheetsAgentTools'
 import { AppFrame } from '@purescience/platform-bridge/components/AppFrame'
 import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
@@ -102,7 +103,7 @@ import {
   validationRuleForCell,
   type InvalidCellFlag,
 } from '../lib/sheetDataFeatures'
-import { csvFromSheet, sheetFromCsv } from '../lib/csv'
+import { csvFromSheet, isDelimitedTextPath, sheetFromCsv, workbookFromCsv } from '../lib/csv'
 import {
   base64ToBytes,
   bytesToBase64,
@@ -368,6 +369,14 @@ export function PureSheetsShell({
     setFilePath(path)
   }, [lifecycle.doc.path])
 
+  // The workbook on disk is this tab's document, as far as the desktop knows: bound once it has a path (an opened
+  // file, or the draft a first edit creates), so Share on the header offers it, the desk brings this tab forward
+  // instead of opening it twice, and a restart reopens it.
+  const workspaceBinding = useWorkspaceDocumentBinding(filePath.trim() || null)
+  useEffect(() => {
+    if (workspaceBinding.error) setStatusMessage(workspaceBinding.error)
+  }, [workspaceBinding.error])
+
   // A workbook the organisation shares, edited live (useLiveJson): everyone's cells merged cell by cell; the live
   // copy writes the workbook, so this tab stops saving it itself while live.
   const livePath = filePath && boundIsPackageRef.current && boundPathRef.current === filePath ? `${filePath}/workbook.json` : null
@@ -460,6 +469,7 @@ export function PureSheetsShell({
   const openWorkbookPath = useCallback(
     async (resourcePath: string): Promise<boolean> => {
       if (/\.xlsx$/i.test(resourcePath)) return importXlsxPath(resourcePath)
+      if (isDelimitedTextPath(resourcePath)) return importCsvPath(resourcePath)
       setStatusMessage('Opening workbook…')
       const opened = await transitions.run(
         () => readWorkbookFromPath(resourcePath, readTextFile),
@@ -1946,6 +1956,33 @@ export function PureSheetsShell({
       lane: 'user',
       kind: 'sheets.import.xlsx',
       summary: `Imported XLSX workbook ${fileNameFromPath(path)}`,
+      refs: { path },
+    })
+    return true
+  }
+
+  /**
+   * A CSV (or TSV) opened as a document, from the desk, a shared file or an agent's openWorkbook: a new workbook of
+   * one sheet named after the file. The file itself is left as it is, as an Excel import leaves its file; it was
+   * read as workbook JSON before, and refused with a parse error.
+   */
+  async function importCsvPath(path: string): Promise<boolean> {
+    const applied = await transitions.run(
+      async () => {
+        setStatusMessage(`Importing ${fileNameFromPath(path)}…`)
+        return workbookFromCsv(await readTextFile(path), fileNameFromPath(path))
+      },
+      imported => {
+        installNewWorkbook(imported)
+        setSaveState('dirty')
+        setStatusMessage(`Imported ${fileNameFromPath(path)}`)
+      },
+    )
+    if (!applied) return false
+    recordLedgerOperation({
+      lane: 'user',
+      kind: 'sheets.import.csv',
+      summary: `Imported CSV ${fileNameFromPath(path)}`,
       refs: { path },
     })
     return true
