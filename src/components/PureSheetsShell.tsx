@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLiveJson } from '@purescience/platform-ui/editing/live/useLiveJson'
 import type React from 'react'
 import styled from 'styled-components'
 import { createWorkbookTransitions } from '../lib/workbookTransitions'
@@ -367,12 +368,41 @@ export function PureSheetsShell({
     setFilePath(path)
   }, [lifecycle.doc.path])
 
+  // A workbook the organisation shares, edited live (useLiveJson): everyone's cells merged cell by cell; the live
+  // copy writes the workbook, so this tab stops saving it itself while live.
+  const livePath = filePath && boundIsPackageRef.current && boundPathRef.current === filePath ? `${filePath}/workbook.json` : null
+  const applyingRemoteRef = useRef(false)
+  const live = useLiveJson(livePath, {
+    loadSaved: async path => JSON.parse(await readTextFile(path)) as Record<string, unknown>,
+    onRemote: next => {
+      // Someone else's change: the whole workbook as it is now, put on screen as an opened one is.
+      applyingRemoteRef.current = true
+      const doc = next as unknown as PureSheetsDocument
+      setDocument(doc)
+      boundDocRef.current = doc
+      refreshUniverSurface()
+      applyingRemoteRef.current = false
+    },
+    serialize: () => ({
+      resourcePath: boundPathRef.current ?? filePath,
+      files: workbookFilesForSave(boundDocRef.current, { boundPath: boundPathRef.current, isPackage: boundIsPackageRef.current }).map(file => ({ name: file.name ?? 'workbook.json', content: String(file.content) })),
+    }),
+  })
+  const liveRef = useRef(live)
+  liveRef.current = live
+
   // Every user edit marks the bound workbook dirty — the first one lazily
   // creates the durable draft in PureDrafts.
   useEffect(() => {
     if (saveState !== 'dirty') return
     if ((filePath.trim() || null) !== boundPathRef.current) return
     boundDocRef.current = document
+    // Live: the change goes to everyone; the live copy writes the workbook when it is time.
+    if (liveRef.current.status === 'on') {
+      if (!applyingRemoteRef.current) liveRef.current.write(JSON.parse(JSON.stringify(document)) as Record<string, unknown>)
+      setSaveState('saved')
+      return
+    }
     lifecycleRef.current.markDirty()
   }, [document, filePath, saveState])
 
