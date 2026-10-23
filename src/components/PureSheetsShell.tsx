@@ -387,6 +387,8 @@ export function PureSheetsShell({
       resourcePath: boundPathRef.current ?? filePath,
       files: workbookFilesForSave(boundDocRef.current, { boundPath: boundPathRef.current, isPackage: boundIsPackageRef.current }).map(file => ({ name: file.name ?? 'workbook.json', content: String(file.content) })),
     }),
+    // Let go by the live copy: the workbook on screen is saved as it always was, so a cell typed just before is kept.
+    onEnded: () => lifecycleRef.current.markDirty(),
   })
   const liveRef = useRef(live)
   liveRef.current = live
