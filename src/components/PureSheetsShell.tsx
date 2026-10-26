@@ -1345,11 +1345,13 @@ export function PureSheetsShell({
     }
     selectCell(cell)
     const message = 'Pasted tabular data'
-    const fallback = () =>
+    const fallback = () => {
       updateActiveSheetFromCurrent(
         sheet => pasteTabularData(sheet, cell, text),
         message,
       )
+      refreshUniverSurface()
+    }
     const editor = univerEditorRef.current
     if (!editor) {
       fallback()

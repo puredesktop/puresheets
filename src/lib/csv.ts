@@ -132,8 +132,9 @@ export function sheetFromCsv(
   text: string,
   id: string,
   name: string,
+  options: { delimiter?: ',' | ';' | '\t' } = {},
 ): WorkbookSheet {
-  const rows = parseCsv(text)
+  const rows = parseCsv(text, options)
   let sheet = createBlankSheet(id, name)
   sheet = {
     ...sheet,
@@ -190,7 +191,14 @@ export function csvFromSheet(
   for (let row = startRow; row <= endRow; row += 1) {
     const values: string[] = []
     for (let column = startColumn; column <= endColumn; column += 1) {
-      values.push(computedCellValue(sheet, cellKey(row, column)))
+      const key = cellKey(row, column)
+      const value = computedCellValue(sheet, key)
+      if (sheet.cells[key]?.kind === 'formula' && value === '#NAME?') {
+        throw new Error(
+          `Cannot export ${key}: its formula has no supported computed value. Export XLSX to preserve the formula instead.`,
+        )
+      }
+      values.push(value)
     }
     rows.push(values)
   }
@@ -208,7 +216,9 @@ export function isDelimitedTextPath(path: string): boolean {
  */
 export function workbookFromCsv(text: string, fileName: string): PureSheetsDocument {
   const base = fileName.replace(/\.[^.]+$/, '').trim() || 'Imported'
-  const sheet = sheetFromCsv(text, 'sheet-1', base)
+  const sheet = sheetFromCsv(text, 'sheet-1', base, {
+    ...(fileName.toLowerCase().endsWith('.tsv') ? { delimiter: '\t' as const } : {}),
+  })
   const workbook = createBlankWorkbook(base)
   return { ...workbook, workbook: { activeSheetId: sheet.id, sheets: [sheet] } }
 }

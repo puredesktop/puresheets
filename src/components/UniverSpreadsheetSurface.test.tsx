@@ -8,16 +8,22 @@ import {
   createUniverSnapshot,
   type PureSheetsUniverSnapshot,
 } from '../lib/univerAdapter'
-import { createBlankWorkbook } from '../lib/workbookModel'
+import {
+  createBlankWorkbook,
+  lockRange,
+  pasteTabularData,
+  upsertCell,
+} from '../lib/workbookModel'
 
 const runtime = vi.hoisted(() => ({
   snapshot: null as PureSheetsUniverSnapshot | null,
   calculation: null as Promise<void> | null,
 }))
+const setValues = vi.fn()
 const worksheet = {
   getSheetId: () => 'sheet-1',
   activate: vi.fn(),
-  getRange: () => ({ setValues: vi.fn() }),
+  getRange: () => ({ setValues }),
 }
 const api = {
   getActiveWorkbook: () => ({
@@ -96,6 +102,7 @@ beforeEach(async () => {
   editor = null
   change.mockClear()
   selection.mockClear()
+  setValues.mockClear()
   runtime.calculation = null
   ;(
     globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -145,4 +152,23 @@ it('drops a range-edit snapshot after the editor is unmounted', async () => {
   })
   expect(change).not.toHaveBeenCalled()
   expect(selection).not.toHaveBeenCalled()
+})
+it('defers multi-cell paste to the model when it touches protected cells', async () => {
+  let document = createBlankWorkbook('Protected paste')
+  let sheet = upsertCell(document.workbook.sheets[0], 'B1', 'keep')
+  sheet = lockRange(sheet, 'B1:B1')
+  document = { ...document, workbook: { ...document.workbook, sheets: [sheet] } }
+  render(createUniverSnapshot(document))
+  await act(async () => {
+    await vi.waitFor(() => expect(editor).not.toBeNull())
+  })
+
+  await act(async () => {
+    expect(await editor!.pasteTabularData('A1', 'new\toverwrite')).toBe(false)
+  })
+  expect(setValues).not.toHaveBeenCalled()
+  expect(change).not.toHaveBeenCalled()
+  const pasted = pasteTabularData(sheet, 'A1', 'new\toverwrite')
+  expect(pasted.cells.A1?.value).toBe('new')
+  expect(pasted.cells.B1?.value).toBe('keep')
 })

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUniverSnapshot } from '../lib/univerAdapter'
 import {
   serializeSheetsHtmlDocument,
+  loadSheetsDocument,
   loadSheetsHtmlDocument,
 } from '../lib/sheetsDocument'
 import type { UniverEditorBridge } from './univerBridgeTypes'
@@ -1448,6 +1449,48 @@ describe('PureSheetsShell file safety', () => {
     saved = JSON.parse(lastSavedContent())
     expect(saved.workbook.sheets[0].cells.A1.value).toBe('edited freely')
     expect(saved.workbook.sheets[0].protection).toBeUndefined()
+  })
+
+  it('applies and refreshes a deferred paste without overwriting locked cells', async () => {
+    writeTextFile.mockResolvedValue(undefined)
+    updatePureSheetsSettings.mockResolvedValue(undefined)
+    const workbookDocument = createBlankWorkbook('Protected paste')
+    workbookDocument.workbook.sheets[0].cells.B1 = {
+      value: 'keep',
+      kind: 'text',
+    }
+    workbookDocument.workbook.sheets[0].protection = {
+      lockedRanges: ['B1:B1'],
+    }
+    render(<PureSheetsShell initialDocument={workbookDocument} />)
+    const lastSurface = () => surfaceRender.mock.calls.at(-1)![0]
+    const initialRevision = lastSurface().revision
+    await act(async () => {
+      lastSurface().onEditorReady({
+        pasteTabularData: vi.fn(async () => false),
+      } as unknown as UniverEditorBridge)
+    })
+    const cellA1 = document.querySelector('button[aria-label="A1"]')
+    if (!(cellA1 instanceof HTMLButtonElement)) throw new Error('A1 not found')
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', {
+      value: { getData: () => 'new\toverwrite' },
+    })
+    await act(async () => {
+      cellA1.dispatchEvent(paste)
+      await flushAsync()
+    })
+
+    expect(agentContext.document?.workbook.sheets[0].cells.A1?.value).toBe('new')
+    expect(agentContext.document?.workbook.sheets[0].cells.B1?.value).toBe('keep')
+    expect(lastSurface().revision).toBe(initialRevision + 1)
+    await act(async () => {
+      triggerSave()
+      await flushAsync()
+    })
+    const reloaded = loadSheetsDocument(lastSavedContent())
+    expect(reloaded.workbook.sheets[0].cells.A1?.value).toBe('new')
+    expect(reloaded.workbook.sheets[0].cells.B1?.value).toBe('keep')
   })
 
   it('applies validation and conditional-format rules and flags invalid entries', async () => {

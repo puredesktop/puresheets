@@ -26,9 +26,13 @@ import {
 } from '../constants'
 import {
   cloneWithUpdatedSheet,
+  computedCellValue,
+  createBlankWorkbook,
   deleteColumn,
+  deleteRow,
   insertColumn,
   insertRow,
+  upsertCell,
 } from './workbookModel'
 import type { PureSheetsDocument, WorkbookSheet } from '../types'
 
@@ -506,6 +510,47 @@ describe('Phase S0 hard gate: .sheets round-trip through the Univer bridge', () 
       'B3:B5',
       'A3:A5',
     ])
+  })
+
+  it('shrinks ranges at deleted endpoints and preserves them after save/reload', () => {
+    let sheet = createBlankWorkbook('Range deletion').workbook.sheets[0]
+    for (const [key, value] of Object.entries({
+      A1: '1',
+      A2: '2',
+      A3: '3',
+      B5: '=SUM(A1:A3)',
+      C5: '=SUM($A$1:$A$3)',
+    })) {
+      sheet = upsertCell(sheet, key, value)
+    }
+    const deleted = deleteRow(sheet, 0)
+    expect(deleted.cells.B4?.value).toBe('=SUM(A1:A2)')
+    expect(deleted.cells.C4?.value).toBe('=SUM($A$1:$A$2)')
+    expect(computedCellValue(deleted, 'B4')).toBe('5')
+    expect(computedCellValue(deleted, 'C4')).toBe('5')
+    const reloaded = loadSheetsDocument(
+      serializeSheetsDocument(cloneWithUpdatedSheet(createBlankWorkbook(), deleted)),
+    )
+    expect(reloaded.workbook.sheets[0].cells.B4?.value).toBe('=SUM(A1:A2)')
+    expect(reloaded.workbook.sheets[0].cells.C4?.value).toBe('=SUM($A$1:$A$2)')
+
+    let columnSheet = createBlankWorkbook('Column deletion').workbook.sheets[0]
+    for (const [key, value] of Object.entries({
+      A1: '1',
+      B1: '2',
+      C1: '3',
+      E5: '=SUM(A1:C1)',
+    })) {
+      columnSheet = upsertCell(columnSheet, key, value)
+    }
+    const columnDeleted = deleteColumn(columnSheet, 0)
+    expect(columnDeleted.cells.D5?.value).toBe('=SUM(A1:B1)')
+    const columnReloaded = loadSheetsDocument(
+      serializeSheetsDocument(
+        cloneWithUpdatedSheet(createBlankWorkbook(), columnDeleted),
+      ),
+    )
+    expect(columnReloaded.workbook.sheets[0].cells.D5?.value).toBe('=SUM(A1:B1)')
   })
 
   it('serializes legacy flat saves in the original single-file format', () => {

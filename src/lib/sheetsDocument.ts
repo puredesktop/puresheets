@@ -158,6 +158,10 @@ function normalizeSheet(input: unknown): WorkbookSheet {
     frozenColumns: optionalInteger(input.frozenColumns),
     filterRow: optionalInteger(input.filterRow),
     filterColumn: optionalInteger(input.filterColumn),
+    filterHasHeader:
+      typeof input.filterHasHeader === 'boolean'
+        ? input.filterHasHeader
+        : undefined,
     filterQuery: normalizeFilterQuery(input.filterQuery),
     charts: normalizeCharts(input.charts),
     comments: normalizeComments(input.comments),

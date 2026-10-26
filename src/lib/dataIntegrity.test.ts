@@ -14,9 +14,13 @@ import { describe, expect, it } from 'vitest'
 import {
   applyAgentCellChangesDirect,
   cloneWithUpdatedSheet,
+  computedCellValue,
+  copyRangeCells,
   createBlankWorkbook,
   deriveCellKind,
   evaluateFormula,
+  pasteCellBlock,
+  setCellStyle,
   upsertCell,
 } from './workbookModel'
 import { addConditionalFormatRule } from './sheetDataFeatures'
@@ -166,6 +170,43 @@ describe('F4: non-numeric number cells survive serialization', () => {
     const a1 = cellData[0]?.[0]
     expect(a1?.v).toBe('N/A')
     expect(a1?.v).not.toBeNull()
+  })
+})
+
+describe('formula errors and raw-value semantics', () => {
+  it('propagates upstream errors through numeric aggregates and IF', () => {
+    const s = sheet({
+      A1: '1',
+      A2: '=1/0',
+      B1: '=SUM(A1:A2)',
+      B2: '=IF(A2,"yes","no")',
+      B3: '=AVERAGE(A1:A2)',
+      B4: '=MIN(A1:A2)',
+      B5: '=MAX(A1:A2)',
+    })
+    for (const key of ['B1', 'B2', 'B3', 'B4', 'B5']) {
+      expect(computedCellValue(s, key), key).toBe('#DIV/0!')
+    }
+  })
+
+  it('does not paste a hidden aggregate error as an incorrect literal number', () => {
+    const s = sheet({ A1: '1', A2: '=1/0', B1: '=SUM(A1:A2)' })
+    const block = copyRangeCells(s, 'B1')
+    if (!block) throw new Error('expected copied formula')
+    const pasted = pasteCellBlock(s, 'C1', block, 'values')
+    expect(pasted.cells.C1).toMatchObject({ value: '#DIV/0!', kind: 'text' })
+  })
+
+  it('does not count blanks as zero in RANK', () => {
+    const s = sheet({ A1: '-2', A3: '-1', B1: '=RANK(A3,A1:A3,0)' })
+    expect(computedCellValue(s, 'B1')).toBe('1')
+  })
+
+  it('uses raw numeric values rather than formatted display text in VLOOKUP', () => {
+    let s = sheet({ A1: '2', B1: '10', C1: '=VLOOKUP(2,A1:B1,2,FALSE)' })
+    s = setCellStyle(s, 'A1', { numberFormat: 'currency' })
+    s = setCellStyle(s, 'B1', { numberFormat: 'currency' })
+    expect(computedCellValue(s, 'C1')).toBe('10')
   })
 })
 

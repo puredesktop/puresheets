@@ -228,6 +228,38 @@ describe('PureSheets document serialization', () => {
       },
     )
   })
+
+  it('preserves unsafe-integer identifiers through native save and reopen', () => {
+    let document = createBlankWorkbook('Identifiers')
+    let sheet = upsertCell(document.workbook.sheets[0], 'A1', '9007199254740993')
+    sheet = {
+      ...sheet,
+      cells: { ...sheet.cells, B1: { value: '00123', kind: 'text' } },
+    }
+    document = { ...document, workbook: { ...document.workbook, sheets: [sheet] } }
+
+    const jsonReloaded = loadSheetsDocument(serializeSheetsDocument(document))
+    const htmlReloaded = loadSheetsHtmlDocument(serializeSheetsHtmlDocument(document))
+    for (const reloaded of [jsonReloaded, htmlReloaded]) {
+      expect(reloaded.workbook.sheets[0].cells.A1).toMatchObject({
+        value: '9007199254740993',
+        kind: 'number',
+      })
+      expect(reloaded.workbook.sheets[0].cells.B1).toMatchObject({
+        value: '00123',
+        kind: 'text',
+      })
+    }
+  })
+
+  it('preserves an explicit headerless filter in legacy native files', () => {
+    const raw = JSON.parse(serializeSheetsDocument(createBlankWorkbook()))
+    delete raw.engine.snapshot
+    Object.assign(raw.workbook.sheets[0], { filterRow: 0, filterHasHeader: false })
+
+    const loaded = loadSheetsDocument(JSON.stringify(raw))
+    expect(loaded.workbook.sheets[0].filterHasHeader).toBe(false)
+  })
 })
 
 describe('workbook calculations', () => {

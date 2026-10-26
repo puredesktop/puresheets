@@ -851,6 +851,18 @@ export function UniverSpreadsheetSurface({
                 )}`
           const range = worksheet.getRange?.(target)
           if (!range?.setValues) return false
+          const sheetId = worksheet.getSheetId?.()
+          const custom = (sheetId
+            ? lastSnapshotRef.current?.sheets[sheetId]?.custom?.puresheets
+            : undefined) as
+            | { protection?: { lockedRanges?: unknown } }
+            | undefined
+          if (
+            Array.isArray(custom?.protection?.lockedRanges) &&
+            custom.protection.lockedRanges.length > 0
+          ) {
+            return false
+          }
           preserveNextCommandRangeSync = true
           range.setValues(matrix)
           return exportSnapshotAfterBridgeEdit(worksheet)
