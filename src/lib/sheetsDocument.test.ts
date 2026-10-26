@@ -234,7 +234,12 @@ describe('PureSheets document serialization', () => {
     let sheet = upsertCell(document.workbook.sheets[0], 'A1', '9007199254740993')
     sheet = {
       ...sheet,
-      cells: { ...sheet.cells, B1: { value: '00123', kind: 'text' } },
+      cells: {
+        ...sheet.cells,
+        B1: { value: '00123', kind: 'text' },
+        C1: { value: '12345678901234567890', kind: 'text' },
+        D1: { value: '1e400', kind: 'text' },
+      },
     }
     document = { ...document, workbook: { ...document.workbook, sheets: [sheet] } }
 
@@ -247,6 +252,14 @@ describe('PureSheets document serialization', () => {
       })
       expect(reloaded.workbook.sheets[0].cells.B1).toMatchObject({
         value: '00123',
+        kind: 'text',
+      })
+      expect(reloaded.workbook.sheets[0].cells.C1).toMatchObject({
+        value: '12345678901234567890',
+        kind: 'text',
+      })
+      expect(reloaded.workbook.sheets[0].cells.D1).toMatchObject({
+        value: '1e400',
         kind: 'text',
       })
     }
@@ -423,6 +436,22 @@ describe('workbook calculations', () => {
     const broken = deleteRow(withoutRow, 0)
     expect(broken.cells.A3?.value).toBe('=#REF!+A1')
     expect(evaluateFormula(broken, broken.cells.A3?.value ?? '')).toBe('#REF!')
+  })
+
+  it('does not rewrite function names or other-sheet references during structural edits', () => {
+    let sheet = createBlankWorkbook().workbook.sheets[0]
+    sheet = upsertCell(sheet, 'A1', '5')
+    sheet = upsertCell(sheet, 'A2', '7')
+    sheet = upsertCell(
+      sheet,
+      'C4',
+      '=LOG10(A1)+ATAN2(A1,2)+DAYS360(A1,A2)+Sheet2!A3',
+    )
+
+    const withRow = insertRow(sheet, 0)
+    expect(withRow.cells.C5?.value).toBe(
+      '=LOG10(A2)+ATAN2(A2,2)+DAYS360(A2,A3)+Sheet2!A3',
+    )
   })
 
   it('keeps relative formulas correct when sorting moves rows', () => {

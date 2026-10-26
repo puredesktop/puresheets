@@ -189,6 +189,24 @@ describe('formula errors and raw-value semantics', () => {
     }
   })
 
+  it('ignores text beginning with # in aggregates instead of treating it as an error', () => {
+    const s = sheet({ A1: '#Qty', A2: '#1', A3: '#N/A', A4: '2', B1: '=SUM(A1:A4)' })
+    expect(computedCellValue(s, 'B1')).toBe('2')
+  })
+
+  it('compares literal and cell text beginning with # in IF conditions', () => {
+    const s = sheet({
+      A1: '#N/A',
+      A2: '#urgent',
+      B1: '=IF(A1="#N/A","missing","ok")',
+      B2: '=IF(A2="#urgent","flagged","ok")',
+      B3: '=IF(A2,"present","missing")',
+    })
+    expect(computedCellValue(s, 'B1')).toBe('missing')
+    expect(computedCellValue(s, 'B2')).toBe('flagged')
+    expect(computedCellValue(s, 'B3')).toBe('present')
+  })
+
   it('does not paste a hidden aggregate error as an incorrect literal number', () => {
     const s = sheet({ A1: '1', A2: '=1/0', B1: '=SUM(A1:A2)' })
     const block = copyRangeCells(s, 'B1')

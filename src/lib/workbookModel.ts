@@ -627,7 +627,7 @@ function mapFormulaRefs(
     .map((segment, index) => {
       if (index % 2 === 1) return segment // inside a quoted string
       return segment.replace(
-        /(\$?)([A-Z]+)(\$?)(\d+)/gi,
+        /(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9(!])/gi,
         (
           token,
           absColumn: string,
@@ -682,7 +682,7 @@ function shiftFormulaRefsForAxis(
     .map((segment, index) => {
       if (index % 2 === 1) return segment
       return segment.replace(
-        /\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?/gi,
+        /(?<!!)\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?(?![A-Z0-9(!])/gi,
         token => {
           if (token.includes(':')) {
             return shiftRangeTokenForAxis(token, axis, target, delta) ?? '#REF!'
@@ -1440,8 +1440,20 @@ function chartFromRange(
   }
 }
 
+const FORMULA_ERROR_VALUES = new Set([
+  '#DIV/0!',
+  '#N/A',
+  '#NAME?',
+  '#NULL!',
+  '#NUM!',
+  '#REF!',
+  '#VALUE',
+  '#VALUE!',
+  '#FORMULA',
+])
+
 export function isFormulaError(value: string): boolean {
-  return /^#[A-Z0-9/?!]+$/i.test(value.trim())
+  return FORMULA_ERROR_VALUES.has(value.trim().toUpperCase())
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,18 +1511,39 @@ function numericArgValues(sheet: WorkbookSheet, arg: string): string[] {
   return [evaluated ?? unquote(arg)]
 }
 
+function formulaArgumentError(
+  sheet: WorkbookSheet,
+  arg: string,
+): string | null {
+  const trimmed = arg.trim()
+  const normalized = trimmed.replace(/\$/g, '')
+  if (/^[A-Z]+\d+(?::[A-Z]+\d+)?$/i.test(normalized)) {
+    for (const key of cellKeysInRange(normalized)) {
+      if (sheet.cells[key]?.kind !== 'formula') continue
+      const value = rawCellValue(sheet, key)
+      if (isFormulaError(value)) return value
+    }
+    return null
+  }
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return null
+  const evaluated = evaluateExpressionString(sheet, trimmed)
+  return evaluated !== null && isFormulaError(evaluated) ? evaluated : null
+}
+
 function applyFormulaFunction(
   sheet: WorkbookSheet,
   fn: string,
   rawArgs: string[],
 ): string {
+  if (['SUM', 'AVERAGE', 'MIN', 'MAX'].includes(fn)) {
+    for (const part of rawArgs) {
+      const error = formulaArgumentError(sheet, part)
+      if (error) return error
+    }
+  }
   const rawValues = rawArgs.flatMap(part =>
     numericArgValues(sheet, part.trim()),
   )
-  if (['SUM', 'AVERAGE', 'MIN', 'MAX'].includes(fn)) {
-    const error = rawValues.find(isFormulaError)
-    if (error) return error
-  }
   const values = rawValues
     // A blank cell is not a zero: without this filter, Number('') === 0 made
     // COUNT/AVERAGE/MIN/MAX over sparse ranges count phantom zeros (caught by
@@ -2074,14 +2107,17 @@ function truthyCondition(
 ): boolean | string {
   const comparison = /^(.+?)(>=|<=|<>|=|>|<)(.+)$/.exec(condition.trim())
   if (!comparison) {
+    const error = formulaArgumentError(sheet, condition)
+    if (error) return error
     const value = resolveTextArg(sheet, condition)
-    if (isFormulaError(value)) return value
     return Boolean(value) && value !== '0' && value.toLowerCase() !== 'false'
   }
+  const leftError = formulaArgumentError(sheet, comparison[1])
+  if (leftError) return leftError
+  const rightError = formulaArgumentError(sheet, comparison[3])
+  if (rightError) return rightError
   const left = resolveTextArg(sheet, comparison[1])
   const right = resolveTextArg(sheet, comparison[3])
-  if (isFormulaError(left)) return left
-  if (isFormulaError(right)) return right
   const leftNumber = Number(left)
   const rightNumber = Number(right)
   const compareAsNumbers =

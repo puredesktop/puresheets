@@ -146,11 +146,11 @@ describe('workbookFromCsv', () => {
 })
 
 describe('CSV formula export limits', () => {
-  it('refuses an unsupported formula result instead of exporting #NAME? as data', () => {
+  it('exports visible formula errors as values', () => {
     let sheet = createBlankWorkbook('Export limits').workbook.sheets[0]
     sheet = upsertCell(sheet, 'A1', '1')
     sheet = upsertCell(sheet, 'A2', '2')
     sheet = upsertCell(sheet, 'B1', '=SUMPRODUCT(A1:A2,A1:A2)')
-    expect(() => csvFromSheet(sheet)).toThrow('B1')
+    expect(csvFromSheet(sheet)).toBe('1,#NAME?\n2,\n')
   })
 })

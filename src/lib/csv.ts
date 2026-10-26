@@ -191,14 +191,7 @@ export function csvFromSheet(
   for (let row = startRow; row <= endRow; row += 1) {
     const values: string[] = []
     for (let column = startColumn; column <= endColumn; column += 1) {
-      const key = cellKey(row, column)
-      const value = computedCellValue(sheet, key)
-      if (sheet.cells[key]?.kind === 'formula' && value === '#NAME?') {
-        throw new Error(
-          `Cannot export ${key}: its formula has no supported computed value. Export XLSX to preserve the formula instead.`,
-        )
-      }
-      values.push(value)
+      values.push(computedCellValue(sheet, cellKey(row, column)))
     }
     rows.push(values)
   }

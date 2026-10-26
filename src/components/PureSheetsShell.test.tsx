@@ -37,6 +37,7 @@ const writeTextFile = vi.fn()
 const readClipboard = vi.fn()
 const writeClipboard = vi.fn()
 const readBinaryFile = vi.fn()
+const openImportFile = vi.fn()
 const updatePureSheetsSettings = vi.fn()
 const createPlatformDraft = vi.fn(async (..._args: unknown[]) => ({
   path: '/workspace/PureDrafts/Untitled — Test.sheets',
@@ -78,6 +79,7 @@ vi.mock('@purescience/platform-ui/bridge/documents.mjs', () => ({
 vi.mock('@purescience/platform-ui/bridge/workspace', () => ({ updateCurrentWorkspaceTab: vi.fn(async () => ({ updated: true })) }))
 
 vi.mock('../bridge/platformBridge', () => ({
+  openImportFile: (...args: unknown[]) => openImportFile(...args),
   readBinaryFile: (...args: unknown[]) => readBinaryFile(...args),
   readClipboard: (...args: unknown[]) => readClipboard(...args),
   readTextFile: (...args: unknown[]) => readTextFile(...args),
@@ -1467,6 +1469,7 @@ describe('PureSheetsShell file safety', () => {
     const initialRevision = lastSurface().revision
     await act(async () => {
       lastSurface().onEditorReady({
+        isCellEditing: () => false,
         pasteTabularData: vi.fn(async () => false),
       } as unknown as UniverEditorBridge)
     })
@@ -1484,6 +1487,21 @@ describe('PureSheetsShell file safety', () => {
     expect(agentContext.document?.workbook.sheets[0].cells.A1?.value).toBe('new')
     expect(agentContext.document?.workbook.sheets[0].cells.B1?.value).toBe('keep')
     expect(lastSurface().revision).toBe(initialRevision + 1)
+    const undoButton = document.querySelector('button[title="Undo"]')
+    const redoButton = document.querySelector('button[title="Redo"]')
+    if (!(undoButton instanceof HTMLButtonElement) || !(redoButton instanceof HTMLButtonElement)) {
+      throw new Error('History controls not found')
+    }
+    await act(async () => {
+      undoButton.click()
+    })
+    expect(agentContext.document?.workbook.sheets[0].cells.A1).toBeUndefined()
+    expect(agentContext.document?.workbook.sheets[0].cells.B1?.value).toBe('keep')
+    await act(async () => {
+      redoButton.click()
+    })
+    expect(agentContext.document?.workbook.sheets[0].cells.A1?.value).toBe('new')
+    expect(agentContext.document?.workbook.sheets[0].cells.B1?.value).toBe('keep')
     await act(async () => {
       triggerSave()
       await flushAsync()
@@ -2140,6 +2158,30 @@ describe('files the desk hands over', () => {
     })
     expect(agentContext.document?.metadata.title).toBe('Bound')
     expect(vi.mocked(updateCurrentWorkspaceTab)).toHaveBeenCalledWith({ resource: { path: '/docs/Bound.sheets' } })
+  })
+
+  it('uses tabs when importing a TSV as a new sheet from the Data menu', async () => {
+    openImportFile.mockResolvedValue('/work/demo.tsv')
+    readTextFile.mockResolvedValue('name\tnote\nalpha\t1,2,3\n')
+    render(<PureSheetsShell initialDocument={createBlankWorkbook()} />)
+    const dataMenu = document.querySelector('button[aria-label="Import or export data"]')
+    if (!(dataMenu instanceof HTMLButtonElement)) throw new Error('Data menu not found')
+    await act(async () => {
+      dataMenu.click()
+    })
+    const importOption = Array.from(document.querySelectorAll('button')).find(
+      button => button.textContent === 'Import CSV as new sheet…',
+    )
+    if (!(importOption instanceof HTMLButtonElement)) throw new Error('Import option not found')
+    await act(async () => {
+      importOption.click()
+      await flushAsync()
+    })
+
+    const imported = agentContext.document?.workbook.sheets[1]
+    expect(imported?.cells.A2?.value).toBe('alpha')
+    expect(imported?.cells.B2?.value).toBe('1,2,3')
+    expect(imported?.cells.C2).toBeUndefined()
   })
 
   it('opens a CSV as a new workbook of one sheet, not as workbook JSON', async () => {

@@ -1880,6 +1880,7 @@ export function PureSheetsShell({
       text,
       `sheet-csv-${Date.now()}`,
       uniqueSheetName(base),
+      path.toLowerCase().endsWith('.tsv') ? { delimiter: '\t' } : {},
     )
     commitDocument(
       current => addSheetToWorkbook(current, sheet),
