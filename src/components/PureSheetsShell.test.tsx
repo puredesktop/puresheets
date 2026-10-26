@@ -777,6 +777,61 @@ describe('PureSheetsShell file safety', () => {
     expect(saved.engine.snapshot.styles).toBeTruthy()
   })
 
+  it('undoes and redoes row and column edits with formulas intact after reload', async () => {
+    writeTextFile.mockResolvedValue(undefined)
+    updatePureSheetsSettings.mockResolvedValue(undefined)
+    const initial = createBlankWorkbook('Structural history')
+    initial.workbook.sheets[0].cells = {
+      A1: { value: '1', kind: 'number' },
+      A2: { value: '2', kind: 'number' },
+      B4: { value: '=SUM(A1:A2)', kind: 'formula' },
+    }
+    render(<PureSheetsShell initialDocument={initial} />)
+    const click = async (title: string) => {
+      const button = document.querySelector(`button[title="${title}"]`)
+      if (!(button instanceof HTMLButtonElement)) throw new Error(`${title} not found`)
+      await act(async () => {
+        button.click()
+      })
+    }
+    const formula = () => agentContext.document?.workbook.sheets[0].cells
+
+    await click('Insert row')
+    expect(formula().B5?.value).toBe('=SUM(A2:A3)')
+    await click('Undo')
+    expect(formula().B4?.value).toBe('=SUM(A1:A2)')
+    await click('Redo')
+    expect(formula().B5?.value).toBe('=SUM(A2:A3)')
+    await click('Delete row')
+    expect(formula().B4?.value).toBe('=SUM(A1:A2)')
+    await click('Undo')
+    expect(formula().B5?.value).toBe('=SUM(A2:A3)')
+    await click('Redo')
+    expect(formula().B4?.value).toBe('=SUM(A1:A2)')
+
+    await click('Insert column')
+    expect(formula().C4?.value).toBe('=SUM(B1:B2)')
+    await click('Undo')
+    expect(formula().B4?.value).toBe('=SUM(A1:A2)')
+    await click('Redo')
+    expect(formula().C4?.value).toBe('=SUM(B1:B2)')
+    await click('Delete column')
+    expect(formula().B4?.value).toBe('=SUM(A1:A2)')
+    await click('Undo')
+    expect(formula().C4?.value).toBe('=SUM(B1:B2)')
+    await click('Redo')
+    expect(formula().B4?.value).toBe('=SUM(A1:A2)')
+
+    await act(async () => {
+      triggerSave()
+      await flushAsync()
+    })
+    const reloaded = loadSheetsDocument(lastSavedContent())
+    expect(reloaded.workbook.sheets[0].cells.A1?.value).toBe('1')
+    expect(reloaded.workbook.sheets[0].cells.A2?.value).toBe('2')
+    expect(reloaded.workbook.sheets[0].cells.B4?.value).toBe('=SUM(A1:A2)')
+  })
+
   it('replaces matches and clears selected ranges from the grid keyboard', async () => {
     writeTextFile.mockResolvedValue(undefined)
     updatePureSheetsSettings.mockResolvedValue(undefined)

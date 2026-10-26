@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { CellValueType } from '@univerjs/core'
 import {
   loadSheetsDocument,
   loadSheetsHtmlDocument,
@@ -7,6 +8,7 @@ import {
 } from './sheetsDocument'
 import {
   createUniverSnapshot,
+  documentFromUniverSnapshot,
   validateUniverSnapshot,
   type PureSheetsUniverSnapshot,
 } from './univerAdapter'
@@ -265,6 +267,45 @@ describe('PureSheets document serialization', () => {
     }
   })
 
+  it('ignores stale numeric-kind metadata after a cell is retyped as text', () => {
+    const original = createBlankWorkbook('Retyped identifier')
+    const sheetId = original.workbook.sheets[0].id
+    const snapshot = createUniverSnapshot(original)
+    snapshot.sheets[sheetId].cellData = {
+      0: {
+        0: {
+          v: '00123',
+          t: CellValueType.STRING,
+          custom: { puresheetsKind: 'number' },
+        },
+        1: {
+          v: 'hello',
+          t: CellValueType.STRING,
+          custom: { puresheetsKind: 'number' },
+        },
+      },
+    }
+
+    const edited = documentFromUniverSnapshot(snapshot, original)
+    expect(edited.workbook.sheets[0].cells.A1).toMatchObject({
+      value: '00123',
+      kind: 'text',
+    })
+    expect(edited.workbook.sheets[0].cells.B1).toMatchObject({
+      value: 'hello',
+      kind: 'text',
+    })
+    const reloaded = loadSheetsDocument(serializeSheetsDocument(edited))
+    expect(reloaded.workbook.sheets[0].cells.A1).toMatchObject({
+      value: '00123',
+      kind: 'text',
+    })
+    expect(reloaded.workbook.sheets[0].cells.B1).toMatchObject({
+      value: 'hello',
+      kind: 'text',
+    })
+  })
+
   it('preserves an explicit headerless filter in legacy native files', () => {
     const raw = JSON.parse(serializeSheetsDocument(createBlankWorkbook()))
     delete raw.engine.snapshot
@@ -445,12 +486,12 @@ describe('workbook calculations', () => {
     sheet = upsertCell(
       sheet,
       'C4',
-      '=LOG10(A1)+ATAN2(A1,2)+DAYS360(A1,A2)+Sheet2!A3',
+      "=LOG10(A1)+ATAN2(A1,2)+DAYS360(A1,A2)+SUM(Sheet2!A1:B5)+Sheet2!AB1+Sheet2!$A$1+'My Sheet'!A1",
     )
 
     const withRow = insertRow(sheet, 0)
     expect(withRow.cells.C5?.value).toBe(
-      '=LOG10(A2)+ATAN2(A2,2)+DAYS360(A2,A3)+Sheet2!A3',
+      "=LOG10(A2)+ATAN2(A2,2)+DAYS360(A2,A3)+SUM(Sheet2!A1:B5)+Sheet2!AB1+Sheet2!$A$1+'My Sheet'!A1",
     )
   })
 
