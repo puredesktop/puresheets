@@ -682,8 +682,10 @@ function shiftFormulaRefsForAxis(
     .map((segment, index) => {
       if (index % 2 === 1) return segment
       return segment.replace(
-        /(?<!!)\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?(?![A-Z0-9(!])/gi,
+        /(?<![A-Z0-9_.$!:])(?:(?:'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?(?![A-Z0-9_.$(!:])/gi,
         token => {
+          // Consume qualified ranges as a whole so neither endpoint nor a suffix is shifted.
+          if (token.includes('!')) return token
           if (token.includes(':')) {
             return shiftRangeTokenForAxis(token, axis, target, delta) ?? '#REF!'
           }

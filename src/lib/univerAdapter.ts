@@ -332,12 +332,18 @@ function cellsFromUniverSheet(
         typeof cell.s === 'string'
           ? fromUniverStyle(styles?.[cell.s] ?? undefined)
           : undefined
-      const custom = cell.custom as { puresheetsKind?: unknown } | undefined
+      const custom = cell.custom as { puresheetsKind?: unknown; puresheetsNumberText?: unknown } | undefined
+      const preservedNumber = custom?.puresheetsKind === 'number' && (
+        custom.puresheetsNumberText === value ||
+        // Older snapshots only marked the kind; retain literals that required text storage.
+        (custom.puresheetsNumberText === undefined && value.trim() !== '' && !Number.isNaN(Number(value)) &&
+          (!Number.isFinite(Number(value)) || (Number.isInteger(Number(value)) && !Number.isSafeInteger(Number(value)))))
+      )
       cells[key] = {
         value,
         kind: cell.f
           ? 'formula'
-          : cell.t === CellValueType.NUMBER || custom?.puresheetsKind === 'number'
+          : cell.t === CellValueType.NUMBER || preservedNumber
           ? 'number'
           : value
           ? 'text'
@@ -471,7 +477,7 @@ function createUniverCell(cell: SheetCell): ICellData {
     // would round through Number. Preserve the exact literal as a string.
     data.v = value
     data.t = CellValueType.STRING
-    data.custom = { puresheetsKind: 'number' }
+    data.custom = { puresheetsKind: 'number', puresheetsNumberText: value }
   } else {
     data.v = value
     data.t = CellValueType.STRING
