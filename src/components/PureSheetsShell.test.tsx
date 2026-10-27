@@ -167,7 +167,10 @@ describe('agent workbook completion integration', () => {
     readBinaryFile.mockResolvedValue({base64:Buffer.from(bytes).toString('base64'),truncated:false})
     const handled=vi.fn()
     render(<PureSheetsShell initialDocument={createBlankWorkbook()} resource={{path:'/work/selected.xlsx'}} onResourceHandled={handled}/>)
-    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));await flushAsync()})
+    await vi.waitFor(async () => {
+      await act(async () => { await flushAsync() })
+      expect(handled).toHaveBeenCalledTimes(1)
+    })
     expect(agentContext.document?.workbook.sheets[0]?.name).toBe('Imported')
     expect(handled).toHaveBeenCalledTimes(1)
   })
@@ -794,7 +797,11 @@ describe('PureSheetsShell file safety', () => {
         button.click()
       })
     }
-    const formula = () => agentContext.document?.workbook.sheets[0].cells
+    const formula = () => {
+      const cells = agentContext.document?.workbook.sheets[0]?.cells
+      if (!cells) throw new Error('The active workbook is unavailable')
+      return cells
+    }
 
     await click('Insert row')
     expect(formula().B5?.value).toBe('=SUM(A2:A3)')
