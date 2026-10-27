@@ -12,10 +12,18 @@ import { PlatformIcon } from '@purescience/platform-ui/components/chrome/Platfor
  */
 
 /** Typed loosely on purpose: styled-components' attrs rejects data-* literals. */
-const chrome = (kind: string): Record<string, string> => ({ 'data-chrome': kind })
+const chrome = (kind: string): Record<string, string> => ({
+  'data-chrome': kind,
+})
 
 export const IconButton = styled.button.attrs(chrome('toolbar-control'))`
   position: relative;
+  &&[aria-pressed='true'] {
+    background: var(--sheets-accent-bg);
+    color: var(--sheets-accent-text);
+    box-shadow: inset 0 0 0 1px
+      color-mix(in srgb, var(--sheets-accent) 28%, transparent);
+  }
 
   &:focus-visible {
     outline: 2px solid var(--pure-chrome-accent);
@@ -31,7 +39,7 @@ export const IconButton = styled.button.attrs(chrome('toolbar-control'))`
     max-width: 220px;
     padding: 5px 7px;
     border: 1px solid var(--platform-colors-border);
-    border-radius: 0;
+    border-radius: 6px;
     background: var(--platform-colors-popover);
     box-shadow: var(--platform-shadow-md);
     color: var(--platform-colors-popover-text);
@@ -44,7 +52,6 @@ export const IconButton = styled.button.attrs(chrome('toolbar-control'))`
     transform: translateX(-50%);
     white-space: nowrap;
   }
-
 `
 
 export const ToolbarDivider = styled.span.attrs(chrome('toolbar-divider'))`

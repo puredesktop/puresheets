@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
 import { Copy, Pencil, Plus, Trash2 } from 'lucide-react'
@@ -44,6 +45,7 @@ export function SheetTabsBar({
   onCommitSheetRename: () => void
   onCancelSheetRename: () => void
 }): React.ReactElement {
+  const renameHandled = useRef(false)
   return (
     <BottomBar>
       <SheetTabs aria-label="Sheet tabs">
@@ -57,6 +59,7 @@ export function SheetTabsBar({
         {sheets.map(sheet => (
           <SheetTab
             key={sheet.id}
+            as={renamingSheetId === sheet.id ? 'div' : 'button'}
             {...sheetAgentRefs(sheet)}
             $active={sheet.id === activeSheetId}
             aria-current={sheet.id === activeSheetId ? 'true' : undefined}
@@ -68,16 +71,25 @@ export function SheetTabsBar({
               <SheetRenameInput
                 value={renameDraft}
                 autoFocus
+                onFocus={() => {
+                  renameHandled.current = false
+                }}
                 aria-label="Sheet name"
                 onChange={event =>
                   onRenameDraftChange(event.currentTarget.value)
                 }
                 onClick={event => event.stopPropagation()}
-                onBlur={onCommitSheetRename}
+                onBlur={() => {
+                  if (!renameHandled.current) onCommitSheetRename()
+                }}
                 onKeyDown={event => {
                   if (event.key === 'Enter') {
+                    event.preventDefault()
+                    renameHandled.current = true
                     onCommitSheetRename()
                   } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    renameHandled.current = true
                     onCancelSheetRename()
                   }
                 }}
@@ -103,7 +115,7 @@ export function SheetTabsBar({
           icon={Trash2}
         />
       </SheetTabs>
-      <Status>{statusText}</Status>
+      <Status title={statusText}>{statusText}</Status>
     </BottomBar>
   )
 }
@@ -115,7 +127,7 @@ const BottomBar = styled.footer`
   align-items: center;
   border-top: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
-  padding: 6px var(--pure-chrome-inset);
+  padding: 8px var(--pure-chrome-inset);
 
   @media (max-width: 720px) {
     grid-template-columns: minmax(0, 1fr);
@@ -135,22 +147,27 @@ const SheetTab = styled.button<{ $active?: boolean }>`
   align-items: center;
   justify-content: center;
   min-width: 72px;
-  /* The active tab is filled with the accent tint and gets an accent underline;
-     inactive tabs stay quiet and muted so the current sheet is obvious. */
-  height: var(--pure-chrome-control-height);
+  flex-shrink: 0;
+  height: 30px;
   border: 1px solid
-    ${({ $active }) =>
-      $active ? 'var(--sheets-accent)' : 'var(--pure-chrome-line)'};
-  border-bottom-width: ${({ $active }) => ($active ? '3px' : '1px')};
-  border-radius: 0;
+    ${({ $active }) => ($active ? 'var(--pure-chrome-line)' : 'transparent')};
+  border-radius: 7px;
   background: ${({ $active }) =>
-    $active ? 'var(--sheets-accent-bg)' : 'var(--pure-chrome-surface)'};
+    $active ? 'var(--sheets-accent-bg)' : 'transparent'};
   padding: 0 10px;
   color: ${({ $active }) =>
     $active ? 'var(--sheets-accent-text)' : 'var(--pure-chrome-soft)'};
   font-size: var(--pure-chrome-ui-size);
   font-weight: ${({ $active }) => ($active ? 600 : 500)};
-  transition: background 160ms ease;
+  white-space: nowrap;
+  cursor: pointer;
+  &:hover {
+    background: var(--pure-chrome-hover);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--sheets-accent);
+    outline-offset: -2px;
+  }
 `
 
 const SheetRenameInput = styled.input`

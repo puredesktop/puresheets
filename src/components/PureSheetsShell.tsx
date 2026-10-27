@@ -7,7 +7,6 @@ import { useWorkbookResourceOpen } from '../hooks/useWorkbookResourceOpen'
 import { useWorkspaceDocumentBinding } from '../hooks/useWorkspaceDocumentBinding'
 import { useSheetsAgentTools } from '../hooks/useSheetsAgentTools'
 import { AppFrame } from '@purescience/platform-bridge/components/AppFrame'
-import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
 import { useDocumentLifecycle } from '@purescience/platform-ui/bridge/react/useDocumentLifecycle'
 import { useDocumentHotkeys } from '@purescience/platform-ui/bridge/react/useDocumentHotkeys'
 import {
@@ -2596,7 +2595,6 @@ export function PureSheetsShell({
                 if (event.key === 'Enter') event.currentTarget.blur()
               }}
             />
-            <FileMeta>Spreadsheet workbook</FileMeta>
           </TitleBlock>
           <CommandBar
             selectedStyle={selectedStyle}
@@ -2854,8 +2852,9 @@ const Toast = styled.div`
 `
 
 const Shell = styled.div`
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   height: 100%;
   /* One chrome for every app: the --sheets-* names are aliases of the
      platform's --pure-chrome-* tokens so the bars, fields and controls
@@ -2879,22 +2878,15 @@ const Shell = styled.div`
   font-size: var(--pure-chrome-ui-size);
 `
 
-// The title + command bar. It wraps to several rows of 28px toolbar
-// controls, so it keeps its own grid rather than the single 36px toolbar;
-// colours and hairline are the toolbar's.
+// The document title and grouped commands share a full-width, quiet header.
 const TopBar = styled.header`
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) minmax(0, auto) auto;
-  gap: var(--pure-chrome-inset);
-  align-items: start;
-  padding: 6px var(--pure-chrome-inset) 8px;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 12px;
+  padding: 14px var(--pure-chrome-inset) 12px;
   border-bottom: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
-
-  @media (max-width: 720px) {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-  }
 `
 
 const TitleBlock = styled.div`
@@ -2913,7 +2905,7 @@ const FileNameInput = styled.input`
   background: transparent;
   color: var(--sheets-ink);
   font: inherit;
-  font-size: var(--pure-chrome-ui-size);
+  font-size: 16px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2925,13 +2917,8 @@ const FileNameInput = styled.input`
   }
 `
 
-const FileMeta = styled(MetaText)`
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-`
-
 const SheetSurface = styled.div`
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;

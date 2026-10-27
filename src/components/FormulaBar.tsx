@@ -172,6 +172,7 @@ export function FormulaBar({
         aria-label="Selected range"
       />
       <FormulaStack>
+        <FormulaMark aria-hidden="true">ƒx</FormulaMark>
         {isFormula && (
           <HighlightMirror ref={mirrorRef} aria-hidden="true">
             {referenceTokens.map((refToken, index) =>
@@ -235,6 +236,7 @@ export function FormulaBar({
               event.currentTarget.blur()
             }
           }}
+          placeholder="Enter a value or formula"
           aria-label="Formula or value"
           aria-autocomplete="list"
           aria-expanded={suggestions.length > 0}
@@ -280,15 +282,15 @@ export function FormulaBar({
 
 const Bar = styled.div`
   display: grid;
-  grid-template-columns: 76px 132px minmax(0, 1fr) minmax(120px, 220px);
+  grid-template-columns: 52px 104px minmax(0, 1fr) minmax(0, 160px);
   gap: 8px;
   align-items: center;
-  padding: 6px var(--pure-chrome-inset);
+  padding: 8px var(--pure-chrome-inset);
   border-bottom: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
 
   @media (max-width: 720px) {
-    grid-template-columns: 56px 96px minmax(0, 1fr);
+    grid-template-columns: 44px 84px minmax(0, 1fr);
   }
 `
 
@@ -298,11 +300,26 @@ const fieldChrome: Record<string, string> = { 'data-chrome': 'field' }
 // The cell reference, formula and range boxes are platform fields (32px,
 // hairline, surface) set in the mono face because their content is code.
 const CellReference = styled.div.attrs(fieldChrome)`
-  border-radius: 0;
+  && {
+    border-color: transparent;
+    background: transparent;
+    color: var(--pure-chrome-soft);
+  }
+  border-radius: 6px;
   font-family: var(--sheets-mono);
   font-weight: 700;
 `
 
+const FormulaMark = styled.span`
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  color: var(--pure-chrome-muted);
+  font: italic 15px Georgia, serif;
+  pointer-events: none;
+`
 const FormulaStack = styled.div`
   position: relative;
   display: grid;
@@ -312,7 +329,8 @@ const FormulaStack = styled.div`
 const FormulaInput = styled.input.attrs(fieldChrome)<{ $mirrored?: boolean }>`
   /* Outrank the shared field rule regardless of stylesheet injection order. */
   && {
-    border-radius: 0;
+    border-radius: 6px;
+    padding-left: 36px;
     background: ${({ $mirrored }) =>
       $mirrored ? 'transparent' : 'var(--pure-chrome-surface)'};
     color: ${({ $mirrored }) =>
@@ -337,7 +355,7 @@ const HighlightMirror = styled.div`
   display: flex;
   align-items: center;
   height: var(--pure-chrome-field-height);
-  padding: 0 10px;
+  padding: 0 10px 0 36px;
   overflow: hidden;
   border: 1px solid transparent;
   background: var(--pure-chrome-surface);
@@ -350,11 +368,11 @@ const HighlightMirror = styled.div`
 
 const ReferenceSpan = styled.span<{ $color: string }>`
   color: ${({ $color }) => $color};
-  font-weight: 700;
+  font-weight: 400;
 `
 
 const RangeInput = styled.input.attrs(fieldChrome)`
-  border-radius: 0;
+  border-radius: 6px;
   font-family: var(--sheets-mono);
   font-weight: 700;
 `
@@ -365,11 +383,11 @@ const SuggestionList = styled.div`
   left: 0;
   z-index: 30;
   display: grid;
-  min-width: 280px;
-  max-width: 420px;
+  width: min(420px, calc(100vw - 190px));
+  min-width: 0;
   padding: 4px;
   border: 1px solid var(--pure-chrome-line);
-  border-radius: 0;
+  border-radius: 6px;
   background: var(--pure-chrome-surface);
   box-shadow: var(--platform-shadow-md);
 `

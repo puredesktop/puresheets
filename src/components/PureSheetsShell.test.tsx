@@ -2260,3 +2260,68 @@ describe('files the desk hands over', () => {
     expect(document.body.textContent).toContain('Imported Budget.csv')
   })
 })
+
+describe('workspace command navigation', () => {
+  it('switches command sections with arrow keys without altering the workbook selection', () => {
+    render(<PureSheetsShell initialDocument={createBlankWorkbook('Navigation')} />)
+    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Spreadsheet tools"] [role="tab"]'))
+    const panel = (tab: HTMLButtonElement) => document.getElementById(tab.getAttribute('aria-controls')!)!
+    expect(tabs.map(tab => tab.textContent)).toEqual(['Format', 'Data', 'Edit'])
+    expect(panel(tabs[0]).hidden).toBe(false)
+    expect(panel(tabs[1]).hidden).toBe(true)
+    act(() => {
+      tabs[0].focus()
+      tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    })
+    expect(document.activeElement).toBe(tabs[1])
+    expect(tabs[1].getAttribute('aria-selected')).toBe('true')
+    expect(panel(tabs[0]).hidden).toBe(true)
+    expect(panel(tabs[1]).hidden).toBe(false)
+    expect((document.querySelector('[aria-label="Selected range"]') as HTMLInputElement).value).toBe('A1:A1')
+    act(() => tabs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })))
+    expect(document.activeElement).toBe(tabs[2])
+    expect(panel(tabs[2]).hidden).toBe(false)
+  })
+
+  it('focuses find on open and returns focus on Escape while retaining the query', () => {
+    render(<PureSheetsShell initialDocument={createBlankWorkbook('Search')} />)
+    const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Find and replace"]')!
+    const input = document.querySelector<HTMLInputElement>('[aria-label="Find cells"]')!
+    const region = document.getElementById(trigger.getAttribute('aria-controls')!)!
+    expect(region.hidden).toBe(true)
+    act(() => trigger.click())
+    expect(document.activeElement).toBe(input)
+    expect(region.hidden).toBe(false)
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'forecast')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    expect(region.hidden).toBe(true)
+    expect(document.activeElement).toBe(trigger)
+    act(() => trigger.click())
+    expect(input.value).toBe('forecast')
+    expect(document.activeElement).toBe(input)
+  })
+
+  it('reflects formatting state and keeps a cancelled sheet rename unchanged', () => {
+    const doc = createBlankWorkbook('Formatting')
+    doc.workbook.sheets[0].cells.A1 = { value: 'Heading', kind: 'text', style: { bold: true } }
+    render(<PureSheetsShell initialDocument={doc} />)
+    const bold = document.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!
+    expect(bold.getAttribute('aria-pressed')).toBe('true')
+    act(() => bold.click())
+    expect(bold.getAttribute('aria-pressed')).toBe('false')
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="Rename sheet"]')!.click())
+    const input = document.querySelector<HTMLInputElement>('[aria-label="Sheet name"]')!
+    expect(input.closest('button')).toBeNull()
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'Uncommitted')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    expect(document.querySelector('[aria-label="Sheet name"]')).toBeNull()
+    expect(document.querySelector('[aria-label="Sheet tabs"]')?.textContent).toContain('Sheet 1')
+    expect(document.querySelector('[aria-label="Sheet tabs"]')?.textContent).not.toContain('Uncommitted')
+  })
+})

@@ -609,7 +609,7 @@ const ChartShelf = styled.section`
   display: flex;
   gap: 10px;
   overflow-x: auto;
-  padding: 10px 12px;
+  padding: 14px var(--pure-chrome-inset);
   border-top: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-well);
 `
@@ -617,11 +617,11 @@ const ChartShelf = styled.section`
 const ChartCard = styled.article`
   display: grid;
   gap: 8px;
-  min-width: 260px;
-  max-width: 340px;
-  padding: 10px;
+  min-width: min(280px, 85vw);
+  max-width: 360px;
+  padding: 14px;
   border: 1px solid var(--pure-chrome-line);
-  border-radius: var(--pure-chrome-radius);
+  border-radius: 10px;
   background: var(--pure-chrome-surface);
 `
 
