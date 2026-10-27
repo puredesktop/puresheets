@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
 import {
@@ -44,6 +44,7 @@ import {
   Type,
   Underline,
   Undo2,
+  X,
 } from 'lucide-react'
 import { PlatformIcon } from '@purescience/platform-ui/components/chrome/PlatformIcon'
 import { ToolIconButton, ToolTextButton, ToolbarDivider } from './controls'
@@ -167,9 +168,10 @@ const IMPORT_EXPORT_OPTIONS: Array<{
 ]
 
 /**
- * Command bar: history/clipboard, text formatting, alignment, data tools,
- * structure, formula/number-format menus, and find/replace. Icon buttons with
- * tooltips throughout; dropdowns are custom menus (no native `<select>`).
+ * Grouped commands: Format, Data, and Edit. History, file actions, and find
+ * stay available in every section. Panels stay mounted to preserve drafts;
+ * hidden sections are removed from the keyboard and accessibility trees.
+ * Dropdowns use the shared platform menu.
  */
 export function CommandBar({
   selectedStyle,
@@ -311,411 +313,515 @@ export function CommandBar({
   const numberFormatLabel =
     NUMBER_FORMAT_OPTIONS.find(option => option.value === numberFormat)
       ?.label ?? 'Text'
+  const toolbarId = useId()
+  const [section, setSection] = useState<'Format' | 'Data' | 'Edit'>('Format')
+  const [findOpen, setFindOpen] = useState(false)
+  const findInputRef = useRef<HTMLInputElement>(null)
+  const findTriggerRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (findOpen) findInputRef.current?.focus()
+  }, [findOpen])
   const [filterDraft, setFilterDraft] = useState(filterQuery)
   useEffect(() => {
     setFilterDraft(filterQuery)
   }, [filterQuery])
   return (
     <Toolbar aria-label="Spreadsheet toolbar">
-      <ToolbarRow>
-      <ToolbarGroup aria-label="File history">
-        <ToolIconButton
-          title="Undo"
-          onClick={onUndo}
-          disabled={!canUndo}
-          icon={Undo2}
-        />
-        <ToolIconButton
-          title="Redo"
-          onClick={onRedo}
-          disabled={!canRedo}
-          icon={Redo2}
-        />
-        <ToolIconButton
-          title="Copy selected range"
-          onClick={() => void onCopySelectedRange()}
-          icon={Copy}
-        />
-        <ToolIconButton
-          title="Cut selected range"
-          onClick={() => void onCopySelectedRange(true)}
-          icon={Scissors}
-        />
-        <ToolIconButton
-          title="Paste from clipboard"
-          onClick={() => void onPasteFromClipboard()}
-          icon={Clipboard}
-        />
-        <ToolIconButton
-          title="Paste values only"
-          onClick={onPasteValuesOnly}
-          icon={ClipboardType}
-        />
-        <ToolIconButton
-          title="Paste formatting only"
-          onClick={onPasteFormattingOnly}
-          icon={PaintRoller}
-        />
-        <ToolIconButton
-          title="Fill down from first row of selection"
-          onClick={onFillDown}
-          icon={ArrowDownToLine}
-        />
-        <ToolIconButton
-          title="Fill right from first column of selection"
-          onClick={onFillRight}
-          icon={ArrowRightToLine}
-        />
-      </ToolbarGroup>
-      <ToolbarDivider />
-      <ToolbarGroup aria-label="Text formatting">
-        <ToolIconButton
-          title="Bold"
-          onClick={() => onToggleStyle('bold')}
-          icon={Bold}
-        />
-        <ToolIconButton
-          title="Italic"
-          onClick={() => onToggleStyle('italic')}
-          icon={Italic}
-        />
-        <ToolIconButton
-          title="Underline"
-          onClick={() => onToggleStyle('underline')}
-          icon={Underline}
-        />
-        <ToolbarMenu
-          label="Font size"
-          displayValue={String(selectedStyle?.fontSize ?? 12)}
-          options={FONT_SIZE_OPTIONS}
-          selectedValue={String(selectedStyle?.fontSize ?? 12)}
-          minWidth={72}
-          onSelect={value => onApplyCellStyle({ fontSize: Number(value) })}
-        />
-        <ColorControl title="Text color">
-          <PlatformIcon icon={Type} size={15} strokeWidth={1.9} />
-          <input
-            aria-label="Text color"
-            type="color"
-            value={selectedStyle?.textColor ?? '#20231f'}
-            onChange={event =>
-              onApplyCellStyle({ textColor: event.currentTarget.value })
-            }
-          />
-        </ColorControl>
-        <ColorControl title="Fill color">
-          <PlatformIcon icon={PaintBucket} size={15} strokeWidth={1.9} />
-          <input
-            aria-label="Fill color"
-            type="color"
-            value={selectedStyle?.fillColor ?? '#ffffff'}
-            onChange={event =>
-              onApplyCellStyle({ fillColor: event.currentTarget.value })
-            }
-          />
-        </ColorControl>
-        <ToolIconButton
-          title="Toggle all borders"
-          onClick={() =>
-            onApplyCellStyle(
-              { border: !selectedStyle?.border },
-              'Updated borders',
-            )
-          }
-          icon={Grid2X2}
-        />
-        <ToolIconButton
-          title="Clear selected range"
-          onClick={onClearSelectedRange}
-          icon={Eraser}
-        />
-      </ToolbarGroup>
-      <ToolbarDivider />
-      <ToolbarGroup aria-label="Alignment">
-        <ToolIconButton
-          title="Align left"
-          onClick={() => onApplyCellStyle({ align: 'left' })}
-          icon={AlignLeft}
-        />
-        <ToolIconButton
-          title="Align center"
-          onClick={() => onApplyCellStyle({ align: 'center' })}
-          icon={AlignCenter}
-        />
-        <ToolIconButton
-          title="Align right"
-          onClick={() => onApplyCellStyle({ align: 'right' })}
-          icon={AlignRight}
-        />
-      </ToolbarGroup>
-      <ToolbarDivider />
-      <ToolbarGroup aria-label="Data tools">
-        <ToolIconButton
-          title="Sort selected range ascending"
-          onClick={() => onSortSelectedRange('asc')}
-          icon={ArrowUpAZ}
-        />
-        <ToolIconButton
-          title="Sort selected range descending"
-          onClick={() => onSortSelectedRange('desc')}
-          icon={ArrowDownAZ}
-        />
-        <ToolIconButton
-          title="Filter selected column"
-          onClick={onToggleFilter}
-          icon={Filter}
-        />
-        {filterActive && (
-          <FilterControls>
-            <FilterColumnChip title={`Filtering column ${filterColumnLabel}`}>
-              Col {filterColumnLabel}
-            </FilterColumnChip>
-            <FindInput
-              value={filterDraft}
-              onChange={event => setFilterDraft(event.currentTarget.value)}
-              onBlur={() => onCommitFilterQuery(filterDraft)}
+      <ToolbarHeader>
+        <Sections role="tablist" aria-label="Spreadsheet tools">
+          {(['Format', 'Data', 'Edit'] as const).map((name, index, names) => (
+            <SectionButton
+              key={name}
+              id={`${toolbarId}-${name}-tab`}
+              type="button"
+              role="tab"
+              aria-selected={section === name}
+              aria-controls={`${toolbarId}-${name}-panel`}
+              tabIndex={section === name ? 0 : -1}
+              onClick={() => setSection(name)}
               onKeyDown={event => {
-                if (event.key === 'Enter') onCommitFilterQuery(filterDraft)
+                const next =
+                  event.key === 'ArrowRight'
+                    ? (index + 1) % names.length
+                    : event.key === 'ArrowLeft'
+                    ? (index + names.length - 1) % names.length
+                    : event.key === 'Home'
+                    ? 0
+                    : event.key === 'End'
+                    ? names.length - 1
+                    : -1
+                if (next < 0) return
+                event.preventDefault()
+                setSection(names[next])
+                const tabs =
+                  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                    '[role="tab"]',
+                  )
+                tabs?.[next]?.focus()
               }}
-              placeholder="contains"
-              aria-label="Filter query"
+            >
+              {name}
+              {name === 'Data' && filterActive ? (
+                <ActiveDot aria-label="Filter active" />
+              ) : null}
+            </SectionButton>
+          ))}
+        </Sections>
+        <QuickActions>
+          <ToolIconButton
+            title="Undo"
+            onClick={onUndo}
+            disabled={!canUndo}
+            icon={Undo2}
+          />
+          <ToolIconButton
+            title="Redo"
+            onClick={onRedo}
+            disabled={!canRedo}
+            icon={Redo2}
+          />
+          <ToolbarMenu
+            label="Import or export data"
+            displayValue="File"
+            icon={FileSpreadsheet}
+            options={IMPORT_EXPORT_OPTIONS}
+            minWidth={200}
+            onSelect={value => onImportExport(value as ImportExportAction)}
+          />
+          <ToolTextButton
+            ref={findTriggerRef}
+            type="button"
+            aria-label="Find and replace"
+            aria-expanded={findOpen}
+            aria-controls={`${toolbarId}-find`}
+            onClick={() => setFindOpen(open => !open)}
+          >
+            <PlatformIcon icon={Search} size={15} /> <span>Find</span>
+          </ToolTextButton>
+        </QuickActions>
+      </ToolbarHeader>
+      <ToolbarRow
+        role="tabpanel"
+        id={`${toolbarId}-Format-panel`}
+        aria-labelledby={`${toolbarId}-Format-tab`}
+        hidden={section !== 'Format'}
+      >
+        <ToolbarGroup role="group" aria-label="Text formatting">
+          <ToolIconButton
+            title="Bold"
+            aria-pressed={Boolean(selectedStyle?.bold)}
+            onClick={() => onToggleStyle('bold')}
+            icon={Bold}
+          />
+          <ToolIconButton
+            title="Italic"
+            aria-pressed={Boolean(selectedStyle?.italic)}
+            onClick={() => onToggleStyle('italic')}
+            icon={Italic}
+          />
+          <ToolIconButton
+            title="Underline"
+            aria-pressed={Boolean(selectedStyle?.underline)}
+            onClick={() => onToggleStyle('underline')}
+            icon={Underline}
+          />
+          <ToolbarMenu
+            label="Font size"
+            displayValue={String(selectedStyle?.fontSize ?? 12)}
+            options={FONT_SIZE_OPTIONS}
+            selectedValue={String(selectedStyle?.fontSize ?? 12)}
+            minWidth={72}
+            onSelect={value => onApplyCellStyle({ fontSize: Number(value) })}
+          />
+          <ColorControl title="Text color">
+            <PlatformIcon icon={Type} size={15} strokeWidth={1.9} />
+            <input
+              aria-label="Text color"
+              type="color"
+              value={selectedStyle?.textColor ?? '#20231f'}
+              onChange={event =>
+                onApplyCellStyle({ textColor: event.currentTarget.value })
+              }
             />
-            <HeaderCheck title="First row is a header (kept visible while filtering)">
-              <input
-                type="checkbox"
-                checked={filterHasHeader}
-                onChange={() => onToggleFilterHeader?.()}
+          </ColorControl>
+          <ColorControl title="Fill color">
+            <PlatformIcon icon={PaintBucket} size={15} strokeWidth={1.9} />
+            <input
+              aria-label="Fill color"
+              type="color"
+              value={selectedStyle?.fillColor ?? '#ffffff'}
+              onChange={event =>
+                onApplyCellStyle({ fillColor: event.currentTarget.value })
+              }
+            />
+          </ColorControl>
+          <ToolIconButton
+            title="Toggle all borders"
+            aria-pressed={Boolean(selectedStyle?.border)}
+            onClick={() =>
+              onApplyCellStyle(
+                { border: !selectedStyle?.border },
+                'Updated borders',
+              )
+            }
+            icon={Grid2X2}
+          />
+          <ToolIconButton
+            title="Clear selected range"
+            onClick={onClearSelectedRange}
+            icon={Eraser}
+          />
+        </ToolbarGroup>
+        <ToolbarDivider />
+        <ToolbarGroup role="group" aria-label="Alignment">
+          <ToolIconButton
+            title="Align left"
+            aria-pressed={selectedStyle?.align === 'left'}
+            onClick={() => onApplyCellStyle({ align: 'left' })}
+            icon={AlignLeft}
+          />
+          <ToolIconButton
+            title="Align center"
+            aria-pressed={selectedStyle?.align === 'center'}
+            onClick={() => onApplyCellStyle({ align: 'center' })}
+            icon={AlignCenter}
+          />
+          <ToolIconButton
+            title="Align right"
+            aria-pressed={selectedStyle?.align === 'right'}
+            onClick={() => onApplyCellStyle({ align: 'right' })}
+            icon={AlignRight}
+          />
+        </ToolbarGroup>
+        <ToolbarDivider />
+        <ToolbarGroup role="group" aria-label="Numbers and formulas">
+          <ToolbarMenu
+            label="Insert formula or operation"
+            displayValue="Formula"
+            icon={Calculator}
+            options={FORMULA_TEMPLATE_OPTIONS}
+            minWidth={140}
+            onSelect={value =>
+              onInsertFormulaTemplate(value as FormulaTemplate)
+            }
+          />
+          <ToolbarMenu
+            label="Number format"
+            displayValue={numberFormatLabel}
+            options={NUMBER_FORMAT_OPTIONS}
+            selectedValue={numberFormat}
+            minWidth={110}
+            onSelect={value =>
+              onApplyCellStyle({
+                numberFormat: value as CellStyle['numberFormat'],
+              })
+            }
+          />
+          <ToolIconButton
+            title="Increase decimal places"
+            onClick={() => onAdjustDecimals(1)}
+            icon={DecimalsArrowRight}
+          />
+          <ToolIconButton
+            title="Decrease decimal places"
+            onClick={() => onAdjustDecimals(-1)}
+            icon={DecimalsArrowLeft}
+          />
+          <ToolbarMenu
+            label="Table style"
+            displayValue="Table"
+            icon={Table}
+            options={TABLE_STYLE_OPTIONS}
+            minWidth={140}
+            onSelect={value => onApplyTableStyle(value as TableStylePreset)}
+          />
+        </ToolbarGroup>
+      </ToolbarRow>
+      <ToolbarRow
+        role="tabpanel"
+        id={`${toolbarId}-Data-panel`}
+        aria-labelledby={`${toolbarId}-Data-tab`}
+        hidden={section !== 'Data'}
+      >
+        <ToolbarGroup role="group" aria-label="Data tools">
+          <ToolIconButton
+            title="Sort selected range ascending"
+            onClick={() => onSortSelectedRange('asc')}
+            icon={ArrowUpAZ}
+          />
+          <ToolIconButton
+            title="Sort selected range descending"
+            onClick={() => onSortSelectedRange('desc')}
+            icon={ArrowDownAZ}
+          />
+          <ToolIconButton
+            title="Filter selected column"
+            aria-pressed={filterActive}
+            onClick={onToggleFilter}
+            icon={Filter}
+          />
+          {filterActive && (
+            <FilterControls>
+              <FilterColumnChip title={`Filtering column ${filterColumnLabel}`}>
+                Col {filterColumnLabel}
+              </FilterColumnChip>
+              <FindInput
+                value={filterDraft}
+                onChange={event => setFilterDraft(event.currentTarget.value)}
+                onBlur={() => onCommitFilterQuery(filterDraft)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') onCommitFilterQuery(filterDraft)
+                }}
+                placeholder="contains"
+                aria-label="Filter query"
               />
-              Header row
-            </HeaderCheck>
-          </FilterControls>
-        )}
-        <ToolIconButton
-          title={firstRowFrozen ? 'Unfreeze first row' : 'Freeze first row'}
-          onClick={onToggleFirstRowFreeze}
-          icon={PanelTop}
-        />
-        <ToolIconButton
-          title={
-            firstColumnFrozen ? 'Unfreeze first column' : 'Freeze first column'
-          }
-          onClick={onToggleFirstColumnFreeze}
-          icon={PanelLeft}
-        />
-        <ToolIconButton
-          title="Protect selected range"
-          onClick={onLockSelectedRange}
-          icon={Lock}
-        />
-        <ToolIconButton
-          title="Unprotect selected range"
-          onClick={onUnlockSelectedRange}
-          icon={LockOpen}
-        />
-        <CommentButtonWrap>
+              <HeaderCheck title="First row is a header (kept visible while filtering)">
+                <input
+                  type="checkbox"
+                  checked={filterHasHeader}
+                  onChange={() => onToggleFilterHeader?.()}
+                />
+                Header row
+              </HeaderCheck>
+            </FilterControls>
+          )}
+          <ToolIconButton
+            aria-pressed={firstRowFrozen}
+            title={firstRowFrozen ? 'Unfreeze first row' : 'Freeze first row'}
+            onClick={onToggleFirstRowFreeze}
+            icon={PanelTop}
+          />
           <ToolIconButton
             title={
-              commentCount > 0
-                ? `Comments (${commentCount}) — click to view`
-                : 'Cell comment'
+              firstColumnFrozen
+                ? 'Unfreeze first column'
+                : 'Freeze first column'
             }
-            onClick={onToggleCommentBar}
-            icon={MessageSquarePlus}
+            aria-pressed={firstColumnFrozen}
+            onClick={onToggleFirstColumnFreeze}
+            icon={PanelLeft}
           />
-          {commentCount > 0 ? (
-            <CommentBadge aria-hidden="true">{commentCount}</CommentBadge>
-          ) : null}
-        </CommentButtonWrap>
-        <ValidationControl
-          selectedRangeLabel={selectedRangeLabel}
-          onApply={onApplyValidation}
-          onClear={onClearValidation}
-        />
-        <ConditionalFormatControl
-          selectedRangeLabel={selectedRangeLabel}
-          onApply={onApplyConditionalFormat}
-          onClear={onClearConditionalFormats}
-        />
-        <ToolbarMenu
-          label="Insert chart from selected range"
-          displayValue="Chart"
-          icon={BarChart3}
-          options={CHART_TYPE_MENU_OPTIONS}
-          minWidth={110}
-          compact
-          onSelect={value => onCreateChart(value as WorkbookChartType)}
-        />
-        <ToolbarMenu
-          label="Import or export data"
-          displayValue="Data"
-          icon={FileSpreadsheet}
-          options={IMPORT_EXPORT_OPTIONS}
-          minWidth={200}
-          compact
-          onSelect={value => onImportExport(value as ImportExportAction)}
-        />
-        <CommentButtonWrap>
           <ToolIconButton
-            title={
-              agentLogCount > 0
-                ? `Agent activity (${agentLogCount}) — click to view`
-                : 'Agent activity'
-            }
-            onClick={onToggleAgentActivity}
-            icon={History}
+            title="Protect selected range"
+            onClick={onLockSelectedRange}
+            icon={Lock}
           />
-          {agentLogCount > 0 ? (
-            <CommentBadge aria-hidden="true">{agentLogCount}</CommentBadge>
-          ) : null}
-        </CommentButtonWrap>
-      </ToolbarGroup>
+          <ToolIconButton
+            title="Unprotect selected range"
+            onClick={onUnlockSelectedRange}
+            icon={LockOpen}
+          />
+          <CommentButtonWrap>
+            <ToolIconButton
+              title={
+                commentCount > 0
+                  ? `Comments (${commentCount}) — click to view`
+                  : 'Cell comment'
+              }
+              onClick={onToggleCommentBar}
+              icon={MessageSquarePlus}
+            />
+            {commentCount > 0 ? (
+              <CommentBadge aria-hidden="true">{commentCount}</CommentBadge>
+            ) : null}
+          </CommentButtonWrap>
+          <ValidationControl
+            selectedRangeLabel={selectedRangeLabel}
+            onApply={onApplyValidation}
+            onClear={onClearValidation}
+          />
+          <ConditionalFormatControl
+            selectedRangeLabel={selectedRangeLabel}
+            onApply={onApplyConditionalFormat}
+            onClear={onClearConditionalFormats}
+          />
+          <ToolbarMenu
+            label="Insert chart from selected range"
+            displayValue="Chart"
+            icon={BarChart3}
+            options={CHART_TYPE_MENU_OPTIONS}
+            minWidth={110}
+            onSelect={value => onCreateChart(value as WorkbookChartType)}
+          />
+
+          <CommentButtonWrap>
+            <ToolIconButton
+              title={
+                agentLogCount > 0
+                  ? `Agent activity (${agentLogCount}) — click to view`
+                  : 'Agent activity'
+              }
+              onClick={onToggleAgentActivity}
+              icon={History}
+            />
+            {agentLogCount > 0 ? (
+              <CommentBadge aria-hidden="true">{agentLogCount}</CommentBadge>
+            ) : null}
+          </CommentButtonWrap>
+        </ToolbarGroup>
       </ToolbarRow>
-      <ToolbarRow>
-            <ToolbarGroup aria-label="Structure">
-        <ToolIconButton
-          title="Insert row"
-          onClick={onInsertRow}
-          icon={TableRowsSplit}
-        />
-        <ToolIconButton
-          title="Delete row"
-          onClick={onDeleteRow}
-          icon={Trash2}
-        />
+      <ToolbarRow
+        role="tabpanel"
+        id={`${toolbarId}-Edit-panel`}
+        aria-labelledby={`${toolbarId}-Edit-tab`}
+        hidden={section !== 'Edit'}
+      >
+        <ToolbarGroup role="group" aria-label="Clipboard">
+          <ToolIconButton
+            title="Copy selected range"
+            onClick={() => void onCopySelectedRange()}
+            icon={Copy}
+          />
+          <ToolIconButton
+            title="Cut selected range"
+            onClick={() => void onCopySelectedRange(true)}
+            icon={Scissors}
+          />
+          <ToolIconButton
+            title="Paste from clipboard"
+            onClick={() => void onPasteFromClipboard()}
+            icon={Clipboard}
+          />
+          <ToolIconButton
+            title="Paste values only"
+            onClick={onPasteValuesOnly}
+            icon={ClipboardType}
+          />
+          <ToolIconButton
+            title="Paste formatting only"
+            onClick={onPasteFormattingOnly}
+            icon={PaintRoller}
+          />
+          <ToolIconButton
+            title="Fill down from first row of selection"
+            onClick={onFillDown}
+            icon={ArrowDownToLine}
+          />
+          <ToolIconButton
+            title="Fill right from first column of selection"
+            onClick={onFillRight}
+            icon={ArrowRightToLine}
+          />
+        </ToolbarGroup>
         <ToolbarDivider />
-        <ToolIconButton
-          title="Insert column"
-          onClick={onInsertColumn}
-          icon={TableColumnsSplit}
-        />
-        <ToolIconButton
-          title="Delete column"
-          onClick={onDeleteColumn}
-          icon={Trash2}
-        />
-        <ToolbarDivider />
-        <ToolIconButton
-          title="Widen selected column"
-          onClick={() => onResizeColumn(24)}
-          icon={Columns3}
-        />
-        <ToolIconButton
-          title="Narrow selected column"
-          onClick={() => onResizeColumn(-24)}
-          icon={Minimize2}
-        />
-        <ToolIconButton
-          title="Taller selected row"
-          onClick={() => onResizeRow(8)}
-          icon={Maximize2}
-        />
-        <ToolIconButton
-          title="Shorter selected row"
-          onClick={() => onResizeRow(-8)}
-          icon={Minimize2}
-        />
-      </ToolbarGroup>
-      <ToolbarDivider />
-      <ToolbarGroup aria-label="Number and find">
-        <ToolbarMenu
-          label="Insert formula or operation"
-          displayValue="Formula"
-          icon={Calculator}
-          options={FORMULA_TEMPLATE_OPTIONS}
-          minWidth={140}
-          compact
-          onSelect={value => onInsertFormulaTemplate(value as FormulaTemplate)}
-        />
-        <ToolbarMenu
-          label="Number format"
-          displayValue={numberFormatLabel}
-          options={NUMBER_FORMAT_OPTIONS}
-          selectedValue={numberFormat}
-          minWidth={110}
-          onSelect={value =>
-            onApplyCellStyle({
-              numberFormat: value as CellStyle['numberFormat'],
-            })
+        <ToolbarGroup role="group" aria-label="Structure">
+          <ToolIconButton
+            title="Insert row"
+            onClick={onInsertRow}
+            icon={TableRowsSplit}
+          />
+          <ToolIconButton
+            title="Delete row"
+            onClick={onDeleteRow}
+            icon={Trash2}
+          />
+          <ToolbarDivider />
+          <ToolIconButton
+            title="Insert column"
+            onClick={onInsertColumn}
+            icon={TableColumnsSplit}
+          />
+          <ToolIconButton
+            title="Delete column"
+            onClick={onDeleteColumn}
+            icon={Trash2}
+          />
+          <ToolbarDivider />
+          <ToolIconButton
+            title="Widen selected column"
+            onClick={() => onResizeColumn(24)}
+            icon={Columns3}
+          />
+          <ToolIconButton
+            title="Narrow selected column"
+            onClick={() => onResizeColumn(-24)}
+            icon={Minimize2}
+          />
+          <ToolIconButton
+            title="Taller selected row"
+            onClick={() => onResizeRow(8)}
+            icon={Maximize2}
+          />
+          <ToolIconButton
+            title="Shorter selected row"
+            onClick={() => onResizeRow(-8)}
+            icon={Minimize2}
+          />
+        </ToolbarGroup>
+      </ToolbarRow>
+      <FindBox
+        id={`${toolbarId}-find`}
+        hidden={!findOpen}
+        onKeyDown={event => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+            setFindOpen(false)
+            findTriggerRef.current?.focus()
           }
+        }}
+      >
+        <FindInput
+          ref={findInputRef}
+          value={findText}
+          onChange={event => onFindTextChange(event.currentTarget.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter') onFindNext()
+          }}
+          placeholder="Find"
+          aria-label="Find cells"
+        />
+        <FindInput
+          value={replaceText}
+          onChange={event => onReplaceTextChange(event.currentTarget.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter') onReplaceNext()
+          }}
+          placeholder="Replace"
+          aria-label="Replace with"
         />
         <ToolIconButton
-          title="Increase decimal places"
-          onClick={() => onAdjustDecimals(1)}
-          icon={DecimalsArrowRight}
+          title={matchCase ? 'Match case: on' : 'Match case: off'}
+          aria-pressed={matchCase}
+          onClick={onToggleMatchCase}
+          icon={CaseSensitive}
         />
-        <ToolIconButton
-          title="Decrease decimal places"
-          onClick={() => onAdjustDecimals(-1)}
-          icon={DecimalsArrowLeft}
-        />
-        <ToolbarMenu
-          label="Table style"
-          displayValue="Table"
-          icon={Table}
-          options={TABLE_STYLE_OPTIONS}
-          minWidth={140}
-          compact
-          onSelect={value => onApplyTableStyle(value as TableStylePreset)}
-        />
-        <FindBox>
-          <FindInput
-            value={findText}
-            onChange={event => onFindTextChange(event.currentTarget.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') onFindNext()
-            }}
-            placeholder="Find"
-            aria-label="Find cells"
-          />
-          <FindInput
-            value={replaceText}
-            onChange={event => onReplaceTextChange(event.currentTarget.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') onReplaceNext()
-            }}
-            placeholder="Replace"
-            aria-label="Replace with"
-          />
-          <ToolIconButton
-            title={matchCase ? 'Match case: on' : 'Match case: off'}
-            aria-pressed={matchCase}
-            onClick={onToggleMatchCase}
-            icon={CaseSensitive}
-          />
-          <ToolIconButton
-            title="Find next"
-            onClick={onFindNext}
-            icon={Search}
-          />
-          {/* Labeled text buttons: the replace actions were undiscoverable as
+        <ToolIconButton title="Find next" onClick={onFindNext} icon={Search} />
+        {/* Labeled text buttons: the replace actions were undiscoverable as
               look-alike icons (two identical "Replace" icons) (#277). */}
-          <FindActionButton
-            type="button"
-            title="Replace next match"
-            aria-label="Replace next match"
-            onClick={onReplaceNext}
-          >
-            Replace
-          </FindActionButton>
-          <FindActionButton
-            type="button"
-            title="Replace matches in selected range"
-            aria-label="Replace matches in selected range"
-            onClick={onReplaceMatches}
-          >
-            In range
-          </FindActionButton>
-          <FindActionButton
-            type="button"
-            title="Replace all in sheet"
-            aria-label="Replace all in sheet"
-            onClick={onReplaceAllInSheet}
-          >
-            All
-          </FindActionButton>
-        </FindBox>
-      </ToolbarGroup>
-      </ToolbarRow>
+        <FindActionButton
+          type="button"
+          title="Replace next match"
+          aria-label="Replace next match"
+          onClick={onReplaceNext}
+        >
+          Replace
+        </FindActionButton>
+        <FindActionButton
+          type="button"
+          title="Replace matches in selected range"
+          aria-label="Replace matches in selected range"
+          onClick={onReplaceMatches}
+        >
+          In range
+        </FindActionButton>
+        <FindActionButton
+          type="button"
+          title="Replace all in sheet"
+          aria-label="Replace all in sheet"
+          onClick={onReplaceAllInSheet}
+        >
+          All
+        </FindActionButton>
+        <ToolIconButton
+          title="Close find and replace"
+          icon={X}
+          onClick={() => {
+            setFindOpen(false)
+            findTriggerRef.current?.focus()
+          }}
+        />
+      </FindBox>
     </Toolbar>
   )
 }
@@ -750,27 +856,59 @@ const CommentBadge = styled.span`
 const Toolbar = styled.div`
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  align-items: flex-end;
-
-  @media (max-width: 720px) {
-    grid-column: 1 / -1;
-    align-items: flex-start;
-  }
+  min-width: 0;
+  gap: 10px;
 `
 
+const ToolbarHeader = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+`
+const Sections = styled.div`
+  display: flex;
+  gap: 4px;
+`
+const SectionButton = styled(ToolTextButton)`
+  && {
+    border-radius: 7px;
+    padding: 0 12px;
+    font-weight: 500;
+    color: var(--pure-chrome-soft);
+  }
+  &&[aria-selected='true'] {
+    color: var(--sheets-ink);
+    background: var(--pure-chrome-selection);
+    font-weight: 600;
+  }
+  &:focus-visible {
+    outline: 2px solid var(--sheets-accent);
+    outline-offset: 2px;
+  }
+`
+const ActiveDot = styled.span`
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--sheets-accent);
+`
+const QuickActions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+`
 const ToolbarRow = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 8px;
   align-items: center;
-  justify-content: flex-end;
-
-  @media (max-width: 720px) {
-    justify-content: flex-start;
+  min-height: 32px;
+  &[hidden] {
+    display: none;
   }
 `
-
 const ToolbarGroup = styled.div`
   display: inline-flex;
   flex-wrap: wrap;
@@ -829,6 +967,11 @@ const ColorControl = styled.label`
 `
 
 const FindBox = styled.div`
+  &[hidden] {
+    display: none;
+  }
+  padding-top: 10px;
+  border-top: 1px solid var(--pure-chrome-line);
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -842,7 +985,7 @@ const FindActionButton = styled(ToolTextButton)``
 
 // A toolbar-height outlined input (the 28px toolbar select's box).
 const FindInput = styled.input.attrs(selectChrome)`
-  width: 88px;
+  width: 140px;
   padding: 0 8px;
   font-weight: 400;
 
@@ -853,6 +996,7 @@ const FindInput = styled.input.attrs(selectChrome)`
 
 const FilterControls = styled.div`
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 `

@@ -1,3 +1,5 @@
+import { linkedTableHtml, tableSnapshotHtml, type LinkedTableReference } from '@purescience/platform-editor/linkedTable'
+import { workbookLinkedSnapshot } from '../lib/linkedTables'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveJson } from '@purescience/platform-ui/editing/live/useLiveJson'
 import type React from 'react'
@@ -7,7 +9,6 @@ import { useWorkbookResourceOpen } from '../hooks/useWorkbookResourceOpen'
 import { useWorkspaceDocumentBinding } from '../hooks/useWorkspaceDocumentBinding'
 import { useSheetsAgentTools } from '../hooks/useSheetsAgentTools'
 import { AppFrame } from '@purescience/platform-bridge/components/AppFrame'
-import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
 import { useDocumentLifecycle } from '@purescience/platform-ui/bridge/react/useDocumentLifecycle'
 import { useDocumentHotkeys } from '@purescience/platform-ui/bridge/react/useDocumentHotkeys'
 import {
@@ -293,6 +294,7 @@ export function PureSheetsShell({
   // clipboard text still matches, the block is pasted instead of the lossy
   // TSV, and it also backs paste-values / paste-formatting.
   const copiedBlockRef = useRef<CopiedCellBlock | null>(null)
+  const copyRequestRef = useRef(0)
   const copiedTextRef = useRef<string | null>(null)
   const formulaRangePickRef = useRef<{
     template: FormulaTemplate
@@ -1409,15 +1411,50 @@ export function PureSheetsShell({
   async function copySelectedRange(cut = false): Promise<void> {
     const range = activeRange()
     if (!range) return
-    const text = rangeToDelimitedText(activeSheet, range)
+    let text = rangeToDelimitedText(activeSheet, range)
     // Capture the rich block BEFORE a cut clears the source cells.
-    const block = copyRangeCells(activeSheet, range)
+    let block = copyRangeCells(activeSheet, range)
+    const copyRequest = ++copyRequestRef.current
+    const version = transitions.version
     try {
-      await writeClipboard(text)
+      let html: string | undefined
+      let live = false
+      if (!cut) {
+        // Publish a durable source before putting a link on the clipboard. A
+        // draft is sufficient; users need not interrupt copying to choose a file.
+        try {
+          await captureEditorWorkbook()
+          if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+          const snapshot = documentRef.current
+          const sourceSheet = snapshot.workbook.sheets.find(sheet => sheet.id === activeSheet.id)
+          if (!sourceSheet) return
+          text = rangeToDelimitedText(sourceSheet, range)
+          block = copyRangeCells(sourceSheet, range)
+          const path = await persistWorkbook(snapshot)
+          if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+          const reference: LinkedTableReference = { version: 1, path,
+            file: boundIsPackageRef.current ? 'workbook.json' : null, tableId: activeSheet.id, range }
+          html = linkedTableHtml(reference, workbookLinkedSnapshot(snapshot, reference))
+          live = true
+        } catch {
+          if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+          // A missing desktop bridge/save permission must not break ordinary copy.
+          try {
+            html = tableSnapshotHtml(workbookLinkedSnapshot(documentRef.current, {
+              version: 1, path: '/unsaved.sheets', file: null, tableId: activeSheet.id, range,
+            }))
+          } catch { /* Oversized ranges keep their ordinary TSV copy. */ }
+        }
+      }
+      if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+      if (html) await writeClipboard(text, html)
+      else await writeClipboard(text)
+      if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
       copiedBlockRef.current = block
       copiedTextRef.current = text
-      setStatusMessage(`${cut ? 'Cut' : 'Copied'} ${range}`)
-      showToast(`${cut ? 'Cut' : 'Copied'} ${range}`)
+      const message = `${cut ? 'Cut' : live ? 'Copied live range' : 'Copied static range (source could not be linked)'} ${range}`
+      setStatusMessage(message)
+      showToast(message)
       if (cut) {
         const editor = univerEditorRef.current
         if (editor) {
@@ -1452,11 +1489,12 @@ export function PureSheetsShell({
   // Copy button, so mirror the selection into the internal clipboard here — that
   // is what the paste-values / paste-formatting buttons read (they can't parse
   // styles back out of the plain-text system clipboard).
-  function captureEditorClipboard(): void {
+  function captureEditorClipboard(cut = false): void {
     const range = normalizeRangeToken(selectedRange)
     if (!range) return
     copiedBlockRef.current = copyRangeCells(activeSheet, range)
     copiedTextRef.current = rangeToDelimitedText(activeSheet, range)
+    if (!cut) void copySelectedRange()
   }
 
   async function pasteFromClipboard(cell = selectedCell): Promise<void> {
@@ -2596,7 +2634,6 @@ export function PureSheetsShell({
                 if (event.key === 'Enter') event.currentTarget.blur()
               }}
             />
-            <FileMeta>Spreadsheet workbook</FileMeta>
           </TitleBlock>
           <CommandBar
             selectedStyle={selectedStyle}
@@ -2854,8 +2891,9 @@ const Toast = styled.div`
 `
 
 const Shell = styled.div`
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   height: 100%;
   /* One chrome for every app: the --sheets-* names are aliases of the
      platform's --pure-chrome-* tokens so the bars, fields and controls
@@ -2879,22 +2917,15 @@ const Shell = styled.div`
   font-size: var(--pure-chrome-ui-size);
 `
 
-// The title + command bar. It wraps to several rows of 28px toolbar
-// controls, so it keeps its own grid rather than the single 36px toolbar;
-// colours and hairline are the toolbar's.
+// The document title and grouped commands share a full-width, quiet header.
 const TopBar = styled.header`
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) minmax(0, auto) auto;
-  gap: var(--pure-chrome-inset);
-  align-items: start;
-  padding: 6px var(--pure-chrome-inset) 8px;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 12px;
+  padding: 14px var(--pure-chrome-inset) 12px;
   border-bottom: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
-
-  @media (max-width: 720px) {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-  }
 `
 
 const TitleBlock = styled.div`
@@ -2913,7 +2944,7 @@ const FileNameInput = styled.input`
   background: transparent;
   color: var(--sheets-ink);
   font: inherit;
-  font-size: var(--pure-chrome-ui-size);
+  font-size: 16px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2925,13 +2956,8 @@ const FileNameInput = styled.input`
   }
 `
 
-const FileMeta = styled(MetaText)`
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-`
-
 const SheetSurface = styled.div`
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;

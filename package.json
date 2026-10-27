@@ -22,7 +22,8 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "styled-components": "^6.1.18",
-    "@purescience/platform-bridge": "file:../../packages/bridge"
+    "@purescience/platform-bridge": "file:../../packages/bridge",
+    "@purescience/platform-editor": "file:../../packages/editor"
   },
   "devDependencies": {
     "@swc/plugin-styled-components": "13.0.0",
