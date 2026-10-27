@@ -1,9 +1,11 @@
 import ExcelJS from 'exceljs'
 import {
   cellKey,
+  columnLabel,
   computedCellValue,
   createBlankSheet,
   createBlankWorkbook,
+  parseCellKey,
 } from './workbookModel'
 import { withFreshUniverSnapshot } from './univerAdapter'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
@@ -56,7 +58,7 @@ export async function importXlsxWorkbook(
     worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
       row.eachCell({ includeEmpty: false }, (cell, columnNumber) => {
         if (++importedCells > 250_000) throw new Error('This workbook exceeds the 250,000 populated-cell import limit. Import a smaller workbook or split it by sheet.')
-        const mapped = mapXlsxCell(cell)
+        const mapped = mapXlsxCell(cell, worksheet)
         if (!mapped) return
         if (mapped.richText) flattenedRichText += 1
         if (mapped.hyperlink) flattenedHyperlinks += 1
@@ -169,6 +171,7 @@ export async function importXlsxWorkbook(
 
 function mapXlsxCell(
   cell: ExcelJS.Cell,
+  worksheet: ExcelJS.Worksheet,
 ): { cell: SheetCell; richText?: boolean; hyperlink?: boolean } | null {
   let value = ''
   let kind: SheetCell['kind'] = 'text'
@@ -183,7 +186,8 @@ function mapXlsxCell(
   } else if (typeof raw === 'boolean') {
     value = raw ? 'TRUE' : 'FALSE'
   } else if (raw instanceof Date) {
-    value = raw.toISOString().slice(0, 10)
+    const iso = raw.toISOString()
+    value = iso.endsWith('T00:00:00.000Z') ? iso.slice(0, 10) : iso
   } else if (typeof raw === 'object') {
     const objectValue = raw as {
       formula?: string
@@ -198,9 +202,18 @@ function mapXlsxCell(
       value = `=${objectValue.formula}`
       kind = 'formula'
     } else if (objectValue.sharedFormula) {
-      // Shared formulas resolve to their cached result — the master formula
-      // text is not addressable per-cell here.
-      value = objectValue.result === undefined ? '' : String(objectValue.result)
+      const master = worksheet.getCell(objectValue.sharedFormula)
+      const masterFormula = (master.value as { formula?: string } | null)?.formula
+      if (masterFormula) {
+        value = `=${translateSharedFormula(
+          masterFormula,
+          Number(cell.row) - Number(master.row),
+          Number(cell.col) - Number(master.col),
+        )}`
+        kind = 'formula'
+      } else {
+        value = objectValue.result === undefined ? '' : String(objectValue.result)
+      }
     } else if (objectValue.richText) {
       value = objectValue.richText.map(part => part.text).join('')
       richText = true
@@ -226,6 +239,30 @@ function mapXlsxCell(
     richText,
     hyperlink,
   }
+}
+
+function translateSharedFormula(
+  formula: string,
+  rowDelta: number,
+  columnDelta: number,
+): string {
+  return formula
+    .split('"')
+    .map((segment, index) => {
+      if (index % 2 === 1) return segment
+      return segment.replace(
+        /(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9(!])/gi,
+        (token, absoluteColumn: string, column: string, absoluteRow: string, row: string) => {
+          const position = parseCellKey(`${column}${row}`)
+          if (!position) return token
+          const nextRow = position.row + (absoluteRow ? 0 : rowDelta)
+          const nextColumn = position.column + (absoluteColumn ? 0 : columnDelta)
+          if (nextRow < 0 || nextColumn < 0) return '#REF!'
+          return `${absoluteColumn}${columnLabel(nextColumn)}${absoluteRow}${nextRow + 1}`
+        },
+      )
+    })
+    .join('"')
 }
 
 function mapXlsxStyle(cell: ExcelJS.Cell): CellStyle | undefined {
@@ -315,7 +352,12 @@ export async function exportXlsxWorkbook(
           formula: cell.value.replace(/^=/, ''),
           result: numericOrText(computedCellValue(sheet, key)),
         } as ExcelJS.CellFormulaValue
-      } else if (cell.kind === 'number' && Number.isFinite(Number(cell.value))) {
+      } else if (
+        cell.kind === 'number' &&
+        Number.isFinite(Number(cell.value)) &&
+        (!Number.isInteger(Number(cell.value)) ||
+          Number.isSafeInteger(Number(cell.value)))
+      ) {
         excelCell.value = Number(cell.value)
       } else if (cell.value) {
         excelCell.value = cell.value

@@ -4,7 +4,7 @@ import styled from 'styled-components'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-conditional-formatting/lib/index.css'
 import { CELL_BORDER_COLOR } from '../constants'
-import { cellKey, parseCellKey } from '../lib/workbookModel'
+import { cellKey, cellsInRange, parseCellKey } from '../lib/workbookModel'
 import { normalizeConditionalFormats } from '../lib/sheetMetadataNormalize'
 import { requestedSheetId } from '../lib/workbookView'
 import type { InvalidCellFlag } from '../lib/sheetDataFeatures'
@@ -851,6 +851,21 @@ export function UniverSpreadsheetSurface({
                 )}`
           const range = worksheet.getRange?.(target)
           if (!range?.setValues) return false
+          const sheetId = worksheet.getSheetId?.()
+          const custom = (sheetId
+            ? lastSnapshotRef.current?.sheets[sheetId]?.custom?.puresheets
+            : undefined) as
+            | { protection?: { lockedRanges?: unknown } }
+            | undefined
+          const targetCells = new Set(cellsInRange(target))
+          const touchesLockedCells =
+            Array.isArray(custom?.protection?.lockedRanges) &&
+            custom.protection.lockedRanges.some(
+              locked =>
+                typeof locked === 'string' &&
+                cellsInRange(locked).some(key => targetCells.has(key)),
+            )
+          if (touchesLockedCells) return false
           preserveNextCommandRangeSync = true
           range.setValues(matrix)
           return exportSnapshotAfterBridgeEdit(worksheet)

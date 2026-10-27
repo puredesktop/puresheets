@@ -627,7 +627,7 @@ function mapFormulaRefs(
     .map((segment, index) => {
       if (index % 2 === 1) return segment // inside a quoted string
       return segment.replace(
-        /(\$?)([A-Z]+)(\$?)(\d+)/gi,
+        /(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9(!])/gi,
         (
           token,
           absColumn: string,
@@ -677,14 +677,28 @@ function shiftFormulaRefsForAxis(
   target: number,
   delta: 1 | -1,
 ): string {
-  return mapFormulaRefs(formula, ref => {
-    const index = axis === 'row' ? ref.row : ref.column
-    if (delta === -1 && index === target) return null // deleted target
-    const shifted = index >= target ? index + delta : index
-    return axis === 'row'
-      ? { row: shifted, column: ref.column }
-      : { row: ref.row, column: shifted }
-  })
+  return formula
+    .split('"')
+    .map((segment, index) => {
+      if (index % 2 === 1) return segment
+      return segment.replace(
+        /(?<!!)\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?(?![A-Z0-9(!])/gi,
+        token => {
+          if (token.includes(':')) {
+            return shiftRangeTokenForAxis(token, axis, target, delta) ?? '#REF!'
+          }
+          return mapFormulaRefs(token, ref => {
+            const refIndex = axis === 'row' ? ref.row : ref.column
+            if (delta === -1 && refIndex === target) return null
+            const shifted = refIndex >= target ? refIndex + delta : refIndex
+            return axis === 'row'
+              ? { row: shifted, column: ref.column }
+              : { row: ref.row, column: shifted }
+          })
+        },
+      )
+    })
+    .join('"')
 }
 
 /**
@@ -769,12 +783,22 @@ function shiftRangeTokenForAxis(
     if (end >= target) end -= 1
     if (end < start) return null
   }
+  const [originalStart, originalEnd] = rangeToken.split(':')
+  const formatRef = (original: string | undefined, row: number, column: number) => {
+    const parts = /^(\$?)[A-Z]+(\$?)\d+$/i.exec(original ?? '')
+    return `${parts?.[1] ?? ''}${columnLabel(column)}${parts?.[2] ?? ''}${row + 1}`
+  }
   return axis === 'row'
-    ? `${cellKey(start, bounds.start.column)}:${cellKey(
+    ? `${formatRef(originalStart, start, bounds.start.column)}:${formatRef(
+        originalEnd,
         end,
         bounds.end.column,
       )}`
-    : `${cellKey(bounds.start.row, start)}:${cellKey(bounds.end.row, end)}`
+    : `${formatRef(originalStart, bounds.start.row, start)}:${formatRef(
+        originalEnd,
+        bounds.end.row,
+        end,
+      )}`
 }
 
 export function insertRow(
@@ -1416,8 +1440,20 @@ function chartFromRange(
   }
 }
 
+const FORMULA_ERROR_VALUES = new Set([
+  '#DIV/0!',
+  '#N/A',
+  '#NAME?',
+  '#NULL!',
+  '#NUM!',
+  '#REF!',
+  '#VALUE',
+  '#VALUE!',
+  '#FORMULA',
+])
+
 export function isFormulaError(value: string): boolean {
-  return /^#[A-Z0-9/?!]+$/i.test(value.trim())
+  return FORMULA_ERROR_VALUES.has(value.trim().toUpperCase())
 }
 
 // ---------------------------------------------------------------------------
@@ -1475,13 +1511,40 @@ function numericArgValues(sheet: WorkbookSheet, arg: string): string[] {
   return [evaluated ?? unquote(arg)]
 }
 
+function formulaArgumentError(
+  sheet: WorkbookSheet,
+  arg: string,
+): string | null {
+  const trimmed = arg.trim()
+  const normalized = trimmed.replace(/\$/g, '')
+  if (/^[A-Z]+\d+(?::[A-Z]+\d+)?$/i.test(normalized)) {
+    for (const key of cellKeysInRange(normalized)) {
+      if (sheet.cells[key]?.kind !== 'formula') continue
+      const value = rawCellValue(sheet, key)
+      if (isFormulaError(value)) return value
+    }
+    return null
+  }
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return null
+  const evaluated = evaluateExpressionString(sheet, trimmed)
+  return evaluated !== null && isFormulaError(evaluated) ? evaluated : null
+}
+
 function applyFormulaFunction(
   sheet: WorkbookSheet,
   fn: string,
   rawArgs: string[],
 ): string {
-  const values = rawArgs
-    .flatMap(part => numericArgValues(sheet, part.trim()))
+  if (['SUM', 'AVERAGE', 'MIN', 'MAX'].includes(fn)) {
+    for (const part of rawArgs) {
+      const error = formulaArgumentError(sheet, part)
+      if (error) return error
+    }
+  }
+  const rawValues = rawArgs.flatMap(part =>
+    numericArgValues(sheet, part.trim()),
+  )
+  const values = rawValues
     // A blank cell is not a zero: without this filter, Number('') === 0 made
     // COUNT/AVERAGE/MIN/MAX over sparse ranges count phantom zeros (caught by
     // the engine-agnostic golden suite against Univer's engine).
@@ -1506,7 +1569,9 @@ function applyFormulaFunction(
     return String(textValues.filter(value => value !== '').length)
   if (fn === 'IF') {
     const [condition, truthy = '', falsy = ''] = rawArgs
-    return truthyCondition(sheet, condition)
+    const conditionResult = truthyCondition(sheet, condition)
+    if (typeof conditionResult === 'string') return conditionResult
+    return conditionResult
       ? resolveTextArg(sheet, truthy)
       : resolveTextArg(sheet, falsy)
   }
@@ -1812,6 +1877,7 @@ function rank(sheet: WorkbookSheet, args: string[]): string {
   const target = Number(resolveTextArg(sheet, valueArg))
   if (!Number.isFinite(target)) return '#VALUE'
   const refValues = expandRange(sheet, refArg.replace(/\$/g, '').trim())
+    .filter(value => value.trim() !== '')
     .map(Number)
     .filter(Number.isFinite)
   const rankVal =
@@ -2035,12 +2101,21 @@ function resolveTextArg(sheet: WorkbookSheet, arg: string): string {
   return expanded[0] ?? ''
 }
 
-function truthyCondition(sheet: WorkbookSheet, condition: string): boolean {
+function truthyCondition(
+  sheet: WorkbookSheet,
+  condition: string,
+): boolean | string {
   const comparison = /^(.+?)(>=|<=|<>|=|>|<)(.+)$/.exec(condition.trim())
   if (!comparison) {
+    const error = formulaArgumentError(sheet, condition)
+    if (error) return error
     const value = resolveTextArg(sheet, condition)
     return Boolean(value) && value !== '0' && value.toLowerCase() !== 'false'
   }
+  const leftError = formulaArgumentError(sheet, comparison[1])
+  if (leftError) return leftError
+  const rightError = formulaArgumentError(sheet, comparison[3])
+  if (rightError) return rightError
   const left = resolveTextArg(sheet, comparison[1])
   const right = resolveTextArg(sheet, comparison[3])
   const leftNumber = Number(left)
@@ -2080,10 +2155,8 @@ function vlookup(sheet: WorkbookSheet, args: string[]): string {
   if (!bounds) return '#VALUE'
   const lookupValue = resolveTextArg(sheet, lookupArg ?? '')
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
-    if (
-      displayCellValue(sheet, cellKey(row, bounds.start.column)) === lookupValue
-    ) {
-      return displayCellValue(
+    if (rawCellValue(sheet, cellKey(row, bounds.start.column)) === lookupValue) {
+      return rawCellValue(
         sheet,
         cellKey(row, bounds.start.column + targetColumnOffset),
       )

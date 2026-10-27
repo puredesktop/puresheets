@@ -97,6 +97,40 @@ describe('XLSX import', () => {
     expect(reloaded.workbook.sheets[0].cells.A1?.style?.bold).toBe(true)
     expect(reloaded.workbook.sheets[0].frozenRows).toBe(1)
   })
+
+  it('translates shared formulas instead of replacing them with cached constants', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Shared')
+    sheet.getCell('A1').value = 2
+    sheet.getCell('A2').value = 4
+    sheet.getCell('B1').value = { formula: 'LOG10(A1)+$C$1', result: 6 }
+    sheet.getCell('B2').value = { sharedFormula: 'B1', result: 12 }
+    const bytes = new Uint8Array(await workbook.xlsx.writeBuffer())
+
+    const { document } = await importXlsxWorkbook(bytes, 'Shared')
+    expect(document.workbook.sheets[0].cells.B2).toMatchObject({
+      value: '=LOG10(A2)+$C$1',
+      kind: 'formula',
+    })
+    const reloaded = loadSheetsDocument(serializeSheetsDocument(document))
+    expect(reloaded.workbook.sheets[0].cells.B2).toMatchObject({
+      value: '=LOG10(A2)+$C$1',
+      kind: 'formula',
+    })
+  })
+
+  it('preserves the time portion of imported Excel datetimes', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Dates')
+    sheet.getCell('A1').value = new Date('2026-10-25T14:35:42.000Z')
+    sheet.getCell('A1').numFmt = 'yyyy-mm-dd hh:mm:ss'
+    const bytes = new Uint8Array(await workbook.xlsx.writeBuffer())
+
+    const { document } = await importXlsxWorkbook(bytes, 'Dates')
+    expect(document.workbook.sheets[0].cells.A1?.value).toBe(
+      '2026-10-25T14:35:42.000Z',
+    )
+  })
 })
 
 describe('XLSX export', () => {
@@ -175,6 +209,17 @@ describe('XLSX export', () => {
     const bytes = await exportXlsxWorkbook(locked)
     const { document } = await importXlsxWorkbook(bytes, 'Locked check')
     expect(document.workbook.sheets[0].cells.A1?.value).toBe('Region')
+  })
+
+  it('exports unsafe-integer identifiers as text instead of rounding them', async () => {
+    const base = createBlankWorkbook('Identifiers')
+    const sheet = upsertCell(base.workbook.sheets[0], 'A1', '9007199254740993')
+    const bytes = await exportXlsxWorkbook({
+      ...base,
+      workbook: { ...base.workbook, sheets: [sheet] },
+    })
+    const { document } = await importXlsxWorkbook(bytes, 'Identifiers')
+    expect(document.workbook.sheets[0].cells.A1?.value).toBe('9007199254740993')
   })
 })
 

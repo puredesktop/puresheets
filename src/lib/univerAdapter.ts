@@ -332,11 +332,12 @@ function cellsFromUniverSheet(
         typeof cell.s === 'string'
           ? fromUniverStyle(styles?.[cell.s] ?? undefined)
           : undefined
+      const custom = cell.custom as { puresheetsKind?: unknown } | undefined
       cells[key] = {
         value,
         kind: cell.f
           ? 'formula'
-          : cell.t === CellValueType.NUMBER
+          : cell.t === CellValueType.NUMBER || custom?.puresheetsKind === 'number'
           ? 'number'
           : value
           ? 'text'
@@ -458,16 +459,19 @@ function createUniverCell(cell: SheetCell): ICellData {
   const data: ICellData = {}
   if (cell.kind === 'formula') {
     data.f = value
-  } else if (cell.kind === 'number' && Number.isFinite(Number(value))) {
+  } else if (
+    cell.kind === 'number' &&
+    Number.isFinite(Number(value)) &&
+    (!Number.isInteger(Number(value)) || Number.isSafeInteger(Number(value)))
+  ) {
     data.v = Number(value)
     data.t = CellValueType.NUMBER
   } else if (cell.kind === 'number') {
-    // A cell tagged "number" whose raw value is not a finite number (e.g. a
-    // stale kind on legacy data, or "N/A"). Number(value) would be NaN, which
-    // JSON.stringify writes as null — silently destroying the text on save.
-    // Preserve the literal value as a string instead.
+    // Non-finite legacy numbers would serialize as null, and unsafe integers
+    // would round through Number. Preserve the exact literal as a string.
     data.v = value
     data.t = CellValueType.STRING
+    data.custom = { puresheetsKind: 'number' }
   } else {
     data.v = value
     data.t = CellValueType.STRING

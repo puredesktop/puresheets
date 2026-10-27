@@ -53,6 +53,16 @@ describe('copy + paste (mode: all)', () => {
     expect(pasted.cells.B3.value).toBe('=$A$1+A3')
   })
 
+  it('shifts qualified references as whole tokens when copying', () => {
+    const sheet = sheetWith({
+      B1: "=Sheet2!AB1+'My Sheet'!A1+$C$1",
+    })
+    const block = copyRangeCells(sheet, 'B1:B1')
+    if (!block) throw new Error('expected a copied block')
+    const pasted = pasteCellBlock(sheet, 'B3', block, 'all')
+    expect(pasted.cells.B3.value).toBe("=Sheet2!AB3+'My Sheet'!A3+$C$1")
+  })
+
   it('blank source cells clear the target, like a spreadsheet paste', () => {
     const sheet = sheetWith({ A1: 'keep-src', C5: 'stale', C6: 'stale too' })
     const block = copyRangeCells(sheet, 'A1:A2') // A2 is blank
