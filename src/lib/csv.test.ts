@@ -136,4 +136,21 @@ describe('workbookFromCsv', () => {
     expect(isDelimitedTextPath('/docs/Budget.sheets')).toBe(false)
     expect(isDelimitedTextPath('/docs/Budget.sheets.html')).toBe(false)
   })
+
+  it('always uses tabs for .tsv even when fields contain more commas', () => {
+    const doc = workbookFromCsv('name\tnote\nalpha\t1,2,3\n', 'demo.tsv')
+    expect(doc.workbook.sheets[0].cells.A2?.value).toBe('alpha')
+    expect(doc.workbook.sheets[0].cells.B2?.value).toBe('1,2,3')
+    expect(doc.workbook.sheets[0].cells.C2).toBeUndefined()
+  })
+})
+
+describe('CSV formula export limits', () => {
+  it('exports visible formula errors as values', () => {
+    let sheet = createBlankWorkbook('Export limits').workbook.sheets[0]
+    sheet = upsertCell(sheet, 'A1', '1')
+    sheet = upsertCell(sheet, 'A2', '2')
+    sheet = upsertCell(sheet, 'B1', '=SUMPRODUCT(A1:A2,A1:A2)')
+    expect(csvFromSheet(sheet)).toBe('1,#NAME?\n2,\n')
+  })
 })
