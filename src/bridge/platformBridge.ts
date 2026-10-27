@@ -43,12 +43,17 @@ export async function readClipboard(): Promise<string> {
   return result.text ?? ''
 }
 
-export async function writeClipboard(text: string): Promise<void> {
+export async function writeClipboard(text: string, html?: string): Promise<void> {
   if (isStandaloneDevMode()) {
-    await navigator.clipboard?.writeText(text)
+    if (html && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+        'text/html': new Blob([html], { type: 'text/html' }),
+      })])
+    } else await navigator.clipboard?.writeText(text)
     return
   }
-  await bridge.call(PLATFORM_BRIDGE_METHODS.CLIPBOARD_WRITE, [text])
+  await bridge.call(PLATFORM_BRIDGE_METHODS.CLIPBOARD_WRITE, [html ? { text, html } : text])
 }
 
 export async function readTextFile(path: string): Promise<string> {

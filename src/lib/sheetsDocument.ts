@@ -1,3 +1,4 @@
+import { workbookLinkedTables } from './linkedTables'
 import type {
   AgentLogCellChange,
   AgentLogEntry,
@@ -30,7 +31,7 @@ export function loadSheetsDocument(raw: string): PureSheetsDocument {
 }
 
 export function serializeSheetsDocument(document: PureSheetsDocument): string {
-  return `${JSON.stringify(touchDocument(document), null, 2)}\n`
+  return `${JSON.stringify({ ...touchDocument(document), linkedTables: workbookLinkedTables(document) }, null, 2)}\n`
 }
 
 export function loadSheetsHtmlDocument(raw: string): PureSheetsDocument {
@@ -47,7 +48,7 @@ export function loadSheetsHtmlDocument(raw: string): PureSheetsDocument {
 export function serializeSheetsHtmlDocument(
   document: PureSheetsDocument,
 ): string {
-  const safeJson = JSON.stringify(touchDocument(document), null, 2)
+  const safeJson = JSON.stringify({ ...touchDocument(document), linkedTables: workbookLinkedTables(document) }, null, 2)
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e')
   return `<!doctype html>
@@ -61,7 +62,7 @@ export function serializeSheetsHtmlDocument(
       <h1>${escapeHtml(document.metadata.title)}</h1>
       <p>Portable PureSheets workbook. Open this file in PureDesktop to edit it.</p>
     </main>
-    <script type="application/json" id="${HTML_DATA_SCRIPT_ID}">${safeJson}</script>
+    <script type="application/json" data-linked-table-source id="${HTML_DATA_SCRIPT_ID}">${safeJson}</script>
   </body>
 </html>
 `

@@ -115,7 +115,7 @@ export function UniverSpreadsheetSurface({
   ) => void
   /** Fired when the user copies/cuts on the canvas (Ctrl+C / Ctrl+X) so the
    *  shell can mirror the selection into its internal clipboard. */
-  onEditorCopy?: () => void
+  onEditorCopy?: (cut?: boolean) => void
   /** Data-validation feedback (Phase S3), keyed by sheet id: the cells whose
    *  current value fails a validation rule. Painted on the canvas as
    *  display-only conditional-format rules — a red tint, never a rejection. */
@@ -1090,7 +1090,7 @@ export function UniverSpreadsheetSurface({
           commandId === 'univer.command.copy' ||
           commandId === 'univer.command.cut'
         ) {
-          onEditorCopyRef.current?.()
+          onEditorCopyRef.current?.(commandId === 'univer.command.cut')
           if (commandId === 'univer.command.copy') return
         }
         if (suppressExport) {

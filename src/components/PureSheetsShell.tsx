@@ -1,3 +1,5 @@
+import { linkedTableHtml, tableSnapshotHtml, type LinkedTableReference } from '@purescience/platform-editor/linkedTable'
+import { workbookLinkedSnapshot } from '../lib/linkedTables'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveJson } from '@purescience/platform-ui/editing/live/useLiveJson'
 import type React from 'react'
@@ -292,6 +294,7 @@ export function PureSheetsShell({
   // clipboard text still matches, the block is pasted instead of the lossy
   // TSV, and it also backs paste-values / paste-formatting.
   const copiedBlockRef = useRef<CopiedCellBlock | null>(null)
+  const copyRequestRef = useRef(0)
   const copiedTextRef = useRef<string | null>(null)
   const formulaRangePickRef = useRef<{
     template: FormulaTemplate
@@ -1408,15 +1411,50 @@ export function PureSheetsShell({
   async function copySelectedRange(cut = false): Promise<void> {
     const range = activeRange()
     if (!range) return
-    const text = rangeToDelimitedText(activeSheet, range)
+    let text = rangeToDelimitedText(activeSheet, range)
     // Capture the rich block BEFORE a cut clears the source cells.
-    const block = copyRangeCells(activeSheet, range)
+    let block = copyRangeCells(activeSheet, range)
+    const copyRequest = ++copyRequestRef.current
+    const version = transitions.version
     try {
-      await writeClipboard(text)
+      let html: string | undefined
+      let live = false
+      if (!cut) {
+        // Publish a durable source before putting a link on the clipboard. A
+        // draft is sufficient; users need not interrupt copying to choose a file.
+        try {
+          await captureEditorWorkbook()
+          if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+          const snapshot = documentRef.current
+          const sourceSheet = snapshot.workbook.sheets.find(sheet => sheet.id === activeSheet.id)
+          if (!sourceSheet) return
+          text = rangeToDelimitedText(sourceSheet, range)
+          block = copyRangeCells(sourceSheet, range)
+          const path = await persistWorkbook(snapshot)
+          if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+          const reference: LinkedTableReference = { version: 1, path,
+            file: boundIsPackageRef.current ? 'workbook.json' : null, tableId: activeSheet.id, range }
+          html = linkedTableHtml(reference, workbookLinkedSnapshot(snapshot, reference))
+          live = true
+        } catch {
+          if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+          // A missing desktop bridge/save permission must not break ordinary copy.
+          try {
+            html = tableSnapshotHtml(workbookLinkedSnapshot(documentRef.current, {
+              version: 1, path: '/unsaved.sheets', file: null, tableId: activeSheet.id, range,
+            }))
+          } catch { /* Oversized ranges keep their ordinary TSV copy. */ }
+        }
+      }
+      if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
+      if (html) await writeClipboard(text, html)
+      else await writeClipboard(text)
+      if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
       copiedBlockRef.current = block
       copiedTextRef.current = text
-      setStatusMessage(`${cut ? 'Cut' : 'Copied'} ${range}`)
-      showToast(`${cut ? 'Cut' : 'Copied'} ${range}`)
+      const message = `${cut ? 'Cut' : live ? 'Copied live range' : 'Copied static range (source could not be linked)'} ${range}`
+      setStatusMessage(message)
+      showToast(message)
       if (cut) {
         const editor = univerEditorRef.current
         if (editor) {
@@ -1451,11 +1489,12 @@ export function PureSheetsShell({
   // Copy button, so mirror the selection into the internal clipboard here — that
   // is what the paste-values / paste-formatting buttons read (they can't parse
   // styles back out of the plain-text system clipboard).
-  function captureEditorClipboard(): void {
+  function captureEditorClipboard(cut = false): void {
     const range = normalizeRangeToken(selectedRange)
     if (!range) return
     copiedBlockRef.current = copyRangeCells(activeSheet, range)
     copiedTextRef.current = rangeToDelimitedText(activeSheet, range)
+    if (!cut) void copySelectedRange()
   }
 
   async function pasteFromClipboard(cell = selectedCell): Promise<void> {

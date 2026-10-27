@@ -2325,3 +2325,54 @@ describe('workspace command navigation', () => {
     expect(document.querySelector('[aria-label="Sheet tabs"]')?.textContent).not.toContain('Uncommitted')
   })
 })
+
+describe('live range clipboard publication', () => {
+  it('saves the source before copying portable linked HTML and ordinary TSV', async () => {
+    const doc = createBlankWorkbook('Linked budget')
+    doc.workbook.sheets[0].cells.A1 = { value: '42', kind: 'number' }
+    render(<PureSheetsShell initialDocument={doc} />)
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('[title="Copy selected range"]')!.click()
+      await flushAsync(80)
+    })
+    expect(writeClipboard).toHaveBeenCalled()
+    const [text, html] = writeClipboard.mock.calls.at(-1)!
+    expect(text).toBe('42')
+    const table = new DOMParser().parseFromString(html, 'text/html').querySelector('figure[data-live-table]')!
+    const ref = JSON.parse(table.getAttribute('data-live-table')!)
+    expect(ref).toMatchObject({ version: 1, tableId: 'sheet-1', range: 'A1:A1', file: 'workbook.json' })
+    expect(ref.path).toMatch(/\.sheets$/)
+    expect(JSON.parse(lastSavedContent()).linkedTables.tables[0].cells.A1.text).toBe('42')
+  })
+
+  it('keeps copy useful as a static table when saving the source fails', async () => {
+    createPlatformDraft.mockRejectedValueOnce(Error('No write access'))
+    const doc = createBlankWorkbook('Unsaved')
+    doc.workbook.sheets[0].cells.A1 = { value: 'Retained value', kind: 'text' }
+    render(<PureSheetsShell initialDocument={doc} />)
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('[title="Copy selected range"]')!.click()
+      await flushAsync(80)
+    })
+    const [text, html] = writeClipboard.mock.calls.at(-1)!
+    expect(text).toBe('Retained value')
+    expect(html).toContain('<table')
+    expect(html).not.toContain('data-live-table')
+    expect(document.body.textContent).toContain('source could not be linked')
+  })
+
+  it('uses the same linked copy path for a canvas copy, but never links a cut', async () => {
+    render(<PureSheetsShell initialDocument={createBlankWorkbook('Keyboard copy')} />)
+    await act(async () => {
+      surfaceRender.mock.calls.at(-1)![0].onEditorCopy?.(false)
+      await flushAsync(80)
+    })
+    expect(writeClipboard.mock.calls.at(-1)?.[1]).toContain('data-live-table')
+    writeClipboard.mockClear()
+    await act(async () => {
+      surfaceRender.mock.calls.at(-1)![0].onEditorCopy?.(true)
+      await flushAsync()
+    })
+    expect(writeClipboard).not.toHaveBeenCalled()
+  })
+})
