@@ -26,16 +26,21 @@ function formatTime(iso: string): string {
  * Rendered under the formula bar when toggled on, like the comment bar.
  */
 export function AgentActivityBar({
+  hiddenInRoom,
   entries,
   onClose,
 }: {
+  hiddenInRoom?: boolean
   /** The workbook's agent log, newest first. */
   entries: AgentLogEntry[]
   onClose: () => void
 }): React.ReactElement {
   const rendered = entries.slice(0, MAX_RENDERED_ENTRIES)
   return (
-    <Wrap aria-label="Agent activity">
+    <Wrap
+      aria-label="Agent activity"
+      data-compact-hidden={hiddenInRoom || undefined}
+    >
       <Bar>
         <Title>Agent activity</Title>
         <Meta>

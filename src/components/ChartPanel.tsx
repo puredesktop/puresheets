@@ -50,17 +50,22 @@ const LEGEND_OPTIONS: Array<{
 ]
 
 export function ChartPanel({
+  hiddenInRoom,
   charts,
   onDeleteChart,
   onUpdateChart,
 }: {
+  hiddenInRoom?: boolean
   charts: WorkbookChart[]
   onDeleteChart: (chartId: string) => void
   onUpdateChart: (chartId: string, patch: ChartUpdatePatch) => void
 }): React.ReactElement | null {
   if (!charts.length) return null
   return (
-    <ChartShelf aria-label="Workbook charts">
+    <ChartShelf
+      aria-label="Workbook charts"
+      data-compact-hidden={hiddenInRoom || undefined}
+    >
       {charts.map(chart => (
         <ChartCard key={chart.id}>
           <ChartCardBody
