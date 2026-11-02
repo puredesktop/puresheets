@@ -31,6 +31,10 @@ vi.mock('./UniverSpreadsheetSurface', async importOriginal => {
 vi.mock('../hooks/useSheetsAgentTools', () => ({
   useSheetsAgentTools: (_ready: boolean, context: SheetsAgentToolContext) => { agentContext = context },
 }))
+const compactInRoom = vi.hoisted(() => ({ current: false }))
+vi.mock('../hooks/useCompactInRoom', () => ({
+  useCompactInRoom: () => compactInRoom.current,
+}))
 
 const readTextFile = vi.fn()
 const writeTextFile = vi.fn()
@@ -71,6 +75,7 @@ vi.mock('@purescience/platform-ui/bridge/documents.mjs', () => ({
   duplicatePlatformDocument: vi.fn(async () => ({ path: '/workspace/copy' })),
   listPlatformDocumentsByType: vi.fn(async () => []),
   listPlatformRecentDocuments: vi.fn(async () => []),
+  onPlatformDocumentsChanged: vi.fn(() => () => undefined),
   touchPlatformRecentDocument: vi.fn(async () => undefined),
   suggestPlatformDocumentLocation: vi.fn(async () => ({ dir: '/workspace' })),
 }))
@@ -144,6 +149,85 @@ function lastSavedContent(): string {
     | undefined
   return String(pickWorkbook(draftCall?.[0]?.files) ?? '')
 }
+
+describe('compact beside the Executive room', () => {
+  afterEach(() => {
+    compactInRoom.current = false
+  })
+
+  const titleInput = (container: Element): HTMLInputElement =>
+    container.querySelector('input[aria-label="Workbook title"]') as HTMLInputElement
+  const commandBar = (container: Element): Element | null | undefined =>
+    titleInput(container).closest('header')
+  const sheetActions = (container: Element): number =>
+    ['Rename sheet', 'Duplicate sheet', 'Delete sheet'].filter(title =>
+      container.querySelector(`button[title="${title}"]`),
+    ).length
+  const pressOpen = (): void => {
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'o', metaKey: true }))
+    })
+  }
+
+  it('adds nothing when it is off', async () => {
+    const { container } = render(<PureSheetsShell initialDocument={createBlankWorkbook('Plain')} />)
+    await act(async () => { await flushAsync() })
+    expect(document.querySelector('[data-compact-room], [data-compact-hidden]')).toBeNull()
+    expect(document.body.innerHTML).not.toContain('display: none !important')
+    expect(sheetActions(container)).toBe(3)
+    pressOpen()
+    await act(async () => { await flushAsync() })
+    expect(document.body.textContent).toContain('Open a workbook')
+  })
+
+  it('shows the grid, formula bar and tabs, and hides the rest without unmounting it', async () => {
+    compactInRoom.current = true
+    const { container } = render(<PureSheetsShell initialDocument={createBlankWorkbook('Budget')} />)
+    await act(async () => { await flushAsync() })
+
+    expect(commandBar(container)?.hasAttribute('data-compact-hidden')).toBe(true)
+    expect(titleInput(container).value).toBe('Budget')
+    expect(document.querySelector('[data-compact-room]')).not.toBeNull()
+    expect(window.getComputedStyle(commandBar(container) as Element).display).toBe('none')
+
+    for (const visible of [
+      '[aria-label="Formula bar"]',
+      '[data-testid="univer-spreadsheet-surface"]',
+      '[aria-label="Sheet tabs"]',
+    ]) {
+      const element = container.querySelector(visible)
+      expect(element).not.toBeNull()
+      expect(element?.closest('[data-compact-hidden]')).toBeNull()
+      expect(window.getComputedStyle(element as Element).display).not.toBe('none')
+    }
+    expect(sheetActions(container)).toBe(0)
+    expect(agentContext.document?.metadata.title).toBe('Budget')
+
+    pressOpen()
+    await act(async () => { await flushAsync() })
+    expect(document.body.textContent).not.toContain('Open a workbook')
+  })
+
+  it('keeps the same mounted chrome when the split starts and ends', async () => {
+    const ui = <PureSheetsShell initialDocument={createBlankWorkbook('Budget')} />
+    const { container, root } = render(ui)
+    await act(async () => { await flushAsync() })
+    const bar = commandBar(container)
+    const grid = container.querySelector('[data-testid="univer-spreadsheet-surface"]')
+
+    compactInRoom.current = true
+    act(() => { root.render(<PureSheetsShell initialDocument={createBlankWorkbook('Budget')} />) })
+    expect(commandBar(container)).toBe(bar)
+    expect(bar?.hasAttribute('data-compact-hidden')).toBe(true)
+    expect(container.querySelector('[data-testid="univer-spreadsheet-surface"]')).toBe(grid)
+
+    compactInRoom.current = false
+    act(() => { root.render(<PureSheetsShell initialDocument={createBlankWorkbook('Budget')} />) })
+    expect(commandBar(container)).toBe(bar)
+    expect(bar?.hasAttribute('data-compact-hidden')).toBe(false)
+    expect(sheetActions(container)).toBe(3)
+  })
+})
 
 describe('agent workbook completion integration', () => {
   it('opens a selected Excel path through the agent pipeline, keeping its source untouched', async () => {

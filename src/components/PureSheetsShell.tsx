@@ -8,6 +8,7 @@ import { createWorkbookTransitions } from '../lib/workbookTransitions'
 import { useWorkbookResourceOpen } from '../hooks/useWorkbookResourceOpen'
 import { useWorkspaceDocumentBinding } from '../hooks/useWorkspaceDocumentBinding'
 import { useSheetsAgentTools } from '../hooks/useSheetsAgentTools'
+import { useCompactInRoom } from '../hooks/useCompactInRoom'
 import { AppFrame } from '@purescience/platform-bridge/components/AppFrame'
 import { useDocumentLifecycle } from '@purescience/platform-ui/bridge/react/useDocumentLifecycle'
 import { useDocumentHotkeys } from '@purescience/platform-ui/bridge/react/useDocumentHotkeys'
@@ -164,6 +165,7 @@ export function PureSheetsShell({
   resource,
   onResourceHandled,
 }: PureSheetsShellProps): React.ReactElement {
+  const compact = useCompactInRoom()
   const [document, setDocumentState] = useState(initialDocument)
   const documentRef = useRef(document)
   const setDocument = useCallback(
@@ -1048,7 +1050,10 @@ export function PureSheetsShell({
   useDocumentHotkeys({
     onSave: () => void save(),
     onNew: () => void newWorkbook().catch(reportFailure),
-    onOpen: () => setSwitcherOpen(true),
+    // The document list is hidden beside the Executive room; Expand brings it back.
+    onOpen: () => {
+      if (!compact) setSwitcherOpen(true)
+    },
   })
 
   // ⌘/Ctrl+D fill down, ⌘/Ctrl+R fill right. Skips text-entry targets and
@@ -2583,6 +2588,7 @@ export function PureSheetsShell({
     <AppFrame
       inert={switching || undefined}
       aria-busy={switching}
+      data-compact-room={compact || undefined}
       headerDocumentName={
         document.metadata.title?.trim() ||
         (lifecycle.doc.path
@@ -2597,6 +2603,7 @@ export function PureSheetsShell({
         />
       }
     >
+      {compact && <style>{COMPACT_ROOM_CSS}</style>}
       {toast && <Toast role="status">{toast}</Toast>}
       {resourceOpen.failed && (
         <ToolTextButton type="button" onClick={resourceOpen.retry}>
@@ -2609,7 +2616,7 @@ export function PureSheetsShell({
           suffixes={['.sheets', '.sheets.html']}
           variant="modal"
           loadPreview={loadWorkbookPreview}
-          open={switcherOpen}
+          open={switcherOpen && !compact}
           onClose={() => setSwitcherOpen(false)}
           onOpenDocument={path => {
             setSwitcherOpen(false)
@@ -2621,7 +2628,7 @@ export function PureSheetsShell({
           itemNoun="workbook"
           previewStyle="grid"
         />
-        <TopBar>
+        <TopBar data-compact-hidden={compact || undefined}>
           <TitleBlock>
             <FileNameInput
               aria-label="Workbook title"
@@ -2753,6 +2760,7 @@ export function PureSheetsShell({
 
           {agentActivityOpen && (
             <AgentActivityBar
+              hiddenInRoom={compact}
               entries={document.workbook.agentLog ?? []}
               onClose={() => setAgentActivityOpen(false)}
             />
@@ -2760,6 +2768,7 @@ export function PureSheetsShell({
 
           {commentBarOpen && (
             <CommentBar
+              hiddenInRoom={compact}
               selectedCell={selectedCell}
               comment={activeSheet.comments?.[selectedCell] ?? ''}
               rangeLabel={
@@ -2819,6 +2828,7 @@ export function PureSheetsShell({
               </GridScroller>
 
               <ChartPanel
+                hiddenInRoom={compact}
                 charts={activeSheet.charts ?? []}
                 onDeleteChart={deleteChart}
                 onUpdateChart={updateChartConfig}
@@ -2827,6 +2837,7 @@ export function PureSheetsShell({
           </MainArea>
 
           <SheetTabsBar
+            compact={compact}
             sheets={visibleSheets}
             activeSheetId={activeSheet.id}
             renamingSheetId={renamingSheetId}
@@ -2862,6 +2873,17 @@ function fileNameFromPath(path: string): string {
 
 // Brief confirmation toast (copy/cut). Fixed near the bottom-center, above the
 // grid, non-interactive, and fades itself out (#277).
+// Rendered only beside the Executive room, so with compact off none of this
+// exists. Hiding with CSS keeps the header, command bar and panels mounted, with
+// their state and tools alive, for when Expand ends the split. AppFrame's own
+// header is its only direct <header> child; the command bar's is nested.
+const COMPACT_ROOM_CSS = `
+  [data-compact-room] > header,
+  [data-compact-hidden] {
+    display: none !important;
+  }
+`
+
 const Toast = styled.div`
   position: fixed;
   left: 50%;

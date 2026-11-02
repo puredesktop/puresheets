@@ -23,6 +23,7 @@ function compareCells(a: string, b: string): number {
  * are toggled on — no modal.
  */
 export function CommentBar({
+  hiddenInRoom,
   selectedCell,
   comment,
   rangeLabel,
@@ -31,6 +32,7 @@ export function CommentBar({
   onSelectCell,
   onClose,
 }: {
+  hiddenInRoom?: boolean
   selectedCell: string
   comment: string
   /** When the selection spans more than one cell, its range token (e.g.
@@ -65,7 +67,7 @@ export function CommentBar({
   )
 
   return (
-    <Wrap>
+    <Wrap data-compact-hidden={hiddenInRoom || undefined}>
       <Bar aria-label="Cell comment editor">
         <CellLabel>{rangeLabel ?? selectedCell}</CellLabel>
         <CommentInput

@@ -14,6 +14,7 @@ import { sheetAgentRefs } from '../agentRefs'
  * they are not user sheets.
  */
 export function SheetTabsBar({
+  compact = false,
   sheets,
   activeSheetId,
   renamingSheetId,
@@ -29,6 +30,8 @@ export function SheetTabsBar({
   onCommitSheetRename,
   onCancelSheetRename,
 }: {
+  /** Beside the Executive room: tabs and status on one line, no sheet actions. */
+  compact?: boolean
   sheets: WorkbookSheet[]
   activeSheetId: string
   renamingSheetId: string | null
@@ -47,7 +50,7 @@ export function SheetTabsBar({
 }): React.ReactElement {
   const renameHandled = useRef(false)
   return (
-    <BottomBar>
+    <BottomBar $compact={compact}>
       <SheetTabs aria-label="Sheet tabs">
         <AddSheetButton
           title="Add sheet"
@@ -99,28 +102,34 @@ export function SheetTabsBar({
             )}
           </SheetTab>
         ))}
-        <ToolIconButton
-          title="Rename sheet"
-          onClick={onRenameSheet}
-          icon={Pencil}
-        />
-        <ToolIconButton
-          title="Duplicate sheet"
-          onClick={onDuplicateSheet}
-          icon={Copy}
-        />
-        <ToolIconButton
-          title="Delete sheet"
-          onClick={onDeleteSheet}
-          icon={Trash2}
-        />
+        {!compact && (
+          <>
+            <ToolIconButton
+              title="Rename sheet"
+              onClick={onRenameSheet}
+              icon={Pencil}
+            />
+            <ToolIconButton
+              title="Duplicate sheet"
+              onClick={onDuplicateSheet}
+              icon={Copy}
+            />
+            <ToolIconButton
+              title="Delete sheet"
+              onClick={onDeleteSheet}
+              icon={Trash2}
+            />
+          </>
+        )}
       </SheetTabs>
-      <Status title={statusText}>{statusText}</Status>
+      <Status $compact={compact} title={statusText}>
+        {statusText}
+      </Status>
     </BottomBar>
   )
 }
 
-const BottomBar = styled.footer`
+const BottomBar = styled.footer<{ $compact?: boolean }>`
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
@@ -130,8 +139,9 @@ const BottomBar = styled.footer`
   padding: 8px var(--pure-chrome-inset);
 
   @media (max-width: 720px) {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
+    grid-template-columns: ${({ $compact }) =>
+      $compact ? 'minmax(0, 1fr) auto' : 'minmax(0, 1fr)'};
+    gap: ${({ $compact }) => ($compact ? '16px' : '4px')};
   }
 `
 
@@ -186,7 +196,7 @@ const AddSheetButton = styled(IconButton)`
 `
 
 /* Family status-line convention: meta, 11px mono in the muted colour. */
-const Status = styled(MetaText)`
+const Status = styled(MetaText)<{ $compact?: boolean }>`
   min-width: 0;
   max-width: min(45vw, 520px);
   overflow: hidden;
@@ -194,6 +204,6 @@ const Status = styled(MetaText)`
   white-space: nowrap;
 
   @media (max-width: 720px) {
-    max-width: none;
+    max-width: ${({ $compact }) => ($compact ? '38vw' : 'none')};
   }
 `
