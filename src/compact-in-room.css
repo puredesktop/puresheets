@@ -1,0 +1,58 @@
+/* The held look for PureSheets, held in a page (useCompactInRoom). The frame carries data-compact-room only then, and every
+   rule here starts from it, so with compact off nothing in this file applies. Only the shell's own bars change; the grid
+   is Univer's and stays as it is. Calm enterprise software: one white surface, 1px hairlines (#dde1e7), no tints,
+   pills or shadows, corners 3px at most, sans type. Formula text keeps its mono face because it is code. */
+
+[data-compact-room],
+[data-compact-room] [class*='PureSheetsShell__Shell-'] {
+  background: #ffffff;
+}
+
+/* Formula bar: white, one hairline under it, fields 28px with a 1px border. */
+[data-compact-room] [class*='FormulaBar__Bar-'] {
+  padding-block: 6px;
+  border-bottom: 1px solid #dde1e7;
+  background: #ffffff;
+}
+[data-compact-room] [class*='FormulaBar__Bar-'] [data-chrome='field'],
+[data-compact-room] [class*='FormulaBar__Bar-'] input {
+  height: 28px;
+  min-height: 28px;
+  border-radius: 3px;
+  border-color: #cdd1d7;
+  background: #ffffff;
+  box-shadow: none;
+}
+[data-compact-room] [class*='FormulaBar__Bar-'] [class*='FormulaBar__CellReference-'][data-chrome='field'] {
+  border-color: transparent;
+  background: transparent;
+  font-family: var(--platform-typography-font-family);
+  font-weight: 500;
+}
+
+/* Sheet tabs and the status line: white, one hairline above, flat tabs. */
+[data-compact-room] [class*='SheetTabsBar__BottomBar-'] {
+  padding-block: 5px;
+  border-top: 1px solid #dde1e7;
+  background: #ffffff;
+  box-shadow: none;
+}
+[data-compact-room] [class*='SheetTabsBar__SheetTab-'] {
+  height: 28px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+[data-compact-room] [class*='SheetTabsBar__SheetTab-'][aria-selected='true'],
+[data-compact-room] [class*='SheetTabsBar__SheetTab-'][aria-current='true'] {
+  border-color: #cdd1d7;
+  background: #ffffff;
+  color: #2f5d8c;
+  font-weight: 600;
+}
+[data-compact-room] [class*='SheetTabsBar__BottomBar-'] button {
+  border-radius: 3px;
+}
+[data-compact-room] [class*='SheetTabsBar__BottomBar-'] [class*='MetaText'] {
+  font-family: var(--platform-typography-font-family);
+  font-size: 12px;
+}
