@@ -1487,6 +1487,40 @@ const evaluatingCells = new Set<string>()
 let formulaEvaluationDepth = 0
 const MAX_FORMULA_EVALUATION_DEPTH = 2048
 
+// Per-state memo of formula results. A cell's result is a pure function of the
+// workbook it is read in, the sheet object it lives on and its key — documents
+// are immutable, so every edit makes new objects and the old entries simply go
+// unused (and are collected with them). Without it every reference re-evaluated
+// its whole dependency chain: a cell naming B120 four times evaluated B120's
+// chain four times, and a running-total column made that exponential — one cell
+// of a 742-formula model took 16 s, and saving (which reads every cell) pinned
+// the renderer for minutes while an agent was writing to it.
+//
+// A result is only kept when it did not depend on HOW it was reached: the cycle
+// guard's #REF!, the depth backstop's #REF!, and NOW()/TODAY() all bump
+// `uncacheableResults`, and any evaluation that saw a bump is left uncached, so
+// cyclic and volatile cells evaluate exactly as they did before. (One edge: a
+// chain deeper than the 2048 backstop may now resolve where it used to stop at
+// #REF!, because a kept link shortens it.)
+const NO_WORKBOOK: object = {}
+const formulaResults = new WeakMap<object, WeakMap<WorkbookSheet, Map<string, string>>>()
+let uncacheableResults = 0
+
+function formulaResultsFor(sheet: WorkbookSheet): Map<string, string> {
+  const root = formulaWorkbook ?? NO_WORKBOOK
+  let bySheet = formulaResults.get(root)
+  if (!bySheet) {
+    bySheet = new WeakMap()
+    formulaResults.set(root, bySheet)
+  }
+  let results = bySheet.get(sheet)
+  if (!results) {
+    results = new Map()
+    bySheet.set(sheet, results)
+  }
+  return results
+}
+
 /** The sheets a formula may name (Sheet2!A1). */
 export interface FormulaWorkbook {
   sheets: readonly WorkbookSheet[]
@@ -1532,7 +1566,10 @@ export function evaluateFormula(sheet: WorkbookSheet, formula: string, workbook?
 }
 
 function evaluateFormulaHere(sheet: WorkbookSheet, formula: string): string {
-  if (formulaEvaluationDepth >= MAX_FORMULA_EVALUATION_DEPTH) return '#REF!'
+  if (formulaEvaluationDepth >= MAX_FORMULA_EVALUATION_DEPTH) {
+    uncacheableResults += 1
+    return '#REF!'
+  }
   formulaEvaluationDepth += 1
   try {
     const expression = formula.trim().replace(/^=/, '')
@@ -1648,8 +1685,10 @@ function applyFormulaFunction(
     )
   }
   if (fn === 'VLOOKUP') return vlookup(sheet, rawArgs)
-  if (fn === 'TODAY') return new Date().toISOString().slice(0, 10)
-  if (fn === 'NOW') return new Date().toISOString()
+  if (fn === 'TODAY' || fn === 'NOW') {
+    uncacheableResults += 1 // volatile: never memoised
+    return fn === 'TODAY' ? new Date().toISOString().slice(0, 10) : new Date().toISOString()
+  }
   if (fn === 'COUNTIF') return countIf(sheet, rawArgs)
   if (fn === 'SUMIF') return sumIf(sheet, rawArgs)
   if (fn === 'AVERAGEIF') return averageIf(sheet, rawArgs)
@@ -2300,10 +2339,20 @@ function rawCellValue(sheet: WorkbookSheet, key: string): string {
   // not affected — unlike the old fixed depth cap, which false-#REF!'d it.
   // Keyed by sheet as well: Costs!A1 and Plan!A1 are different cells.
   const where = `${sheet.id}!${key}`
-  if (evaluatingCells.has(where)) return '#REF!'
+  if (evaluatingCells.has(where)) {
+    uncacheableResults += 1
+    return '#REF!'
+  }
+  // Each cell computes once per workbook state (see formulaResults).
+  const results = formulaResultsFor(sheet)
+  const known = results.get(key)
+  if (known !== undefined) return known
+  const uncacheableBefore = uncacheableResults
   evaluatingCells.add(where)
   try {
-    return evaluateFormulaHere(sheet, cell.value)
+    const value = evaluateFormulaHere(sheet, cell.value)
+    if (uncacheableResults === uncacheableBefore) results.set(key, value)
+    return value
   } finally {
     evaluatingCells.delete(where)
   }
