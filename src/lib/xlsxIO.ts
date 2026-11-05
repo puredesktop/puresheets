@@ -350,7 +350,7 @@ export async function exportXlsxWorkbook(
       if (cell.kind === 'formula') {
         excelCell.value = {
           formula: cell.value.replace(/^=/, ''),
-          result: numericOrText(computedCellValue(sheet, key)),
+          result: numericOrText(computedCellValue(sheet, key, document.workbook)),
         } as ExcelJS.CellFormulaValue
       } else if (
         cell.kind === 'number' &&

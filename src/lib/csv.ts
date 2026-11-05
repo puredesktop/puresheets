@@ -6,6 +6,7 @@ import {
   normalizeRangeToken,
   parseCellKey,
   upsertCell,
+  type FormulaWorkbook,
 } from './workbookModel'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
 import type { PureSheetsDocument, WorkbookSheet } from '../types'
@@ -160,6 +161,7 @@ export function sheetFromCsv(
 export function csvFromSheet(
   sheet: WorkbookSheet,
   rangeToken?: string,
+  workbook?: FormulaWorkbook,
 ): string {
   let startRow = 0
   let startColumn = 0
@@ -191,7 +193,7 @@ export function csvFromSheet(
   for (let row = startRow; row <= endRow; row += 1) {
     const values: string[] = []
     for (let column = startColumn; column <= endColumn; column += 1) {
-      values.push(computedCellValue(sheet, cellKey(row, column)))
+      values.push(computedCellValue(sheet, cellKey(row, column), workbook))
     }
     rows.push(values)
   }

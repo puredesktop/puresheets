@@ -439,8 +439,12 @@ export function replaceAllInSheet(
 }
 
 /** Public computed value (formula results, unformatted) for one cell. */
-export function computedCellValue(sheet: WorkbookSheet, key: string): string {
-  return rawCellValue(sheet, key)
+/**
+ * A cell's computed value. Pass the workbook so a formula can read other sheets (=Costs!B4, ='Q1 plan'!A1:A9);
+ * without it, a reference to another sheet is #REF!.
+ */
+export function computedCellValue(sheet: WorkbookSheet, key: string, workbook?: FormulaWorkbook): string {
+  return inWorkbook(workbook, () => rawCellValue(sheet, key))
 }
 
 function escapeRegExp(input: string): string {
@@ -1397,10 +1401,10 @@ export function addSheetToWorkbook(
   })
 }
 
-export function displayCellValue(sheet: WorkbookSheet, key: string): string {
+export function displayCellValue(sheet: WorkbookSheet, key: string, workbook?: FormulaWorkbook): string {
   const cell = sheet.cells[key]
   if (!cell) return ''
-  return formatCellValue(rawCellValue(sheet, key), cell.style)
+  return formatCellValue(inWorkbook(workbook, () => rawCellValue(sheet, key)), cell.style)
 }
 
 function chartFromRange(
@@ -1483,7 +1487,51 @@ const evaluatingCells = new Set<string>()
 let formulaEvaluationDepth = 0
 const MAX_FORMULA_EVALUATION_DEPTH = 2048
 
-export function evaluateFormula(sheet: WorkbookSheet, formula: string): string {
+/** The sheets a formula may name (Sheet2!A1). */
+export interface FormulaWorkbook {
+  sheets: readonly WorkbookSheet[]
+}
+/** The workbook of the evaluation under way: set by the public entry points, kept by everything they call. */
+let formulaWorkbook: FormulaWorkbook | null = null
+
+function inWorkbook<T>(workbook: FormulaWorkbook | undefined, run: () => T): T {
+  if (!workbook) return run()
+  const before = formulaWorkbook
+  formulaWorkbook = workbook
+  try {
+    return run()
+  } finally {
+    formulaWorkbook = before
+  }
+}
+
+/** A sheet name as a formula writes it: Costs, or 'Q1 plan' with '' for a quote. */
+const SHEET_PREFIX = String.raw`(?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!`
+
+/**
+ * The sheet a reference reads and the reference without its sheet: "Costs!B4" is B4 on Costs. A reference with no
+ * sheet reads its own. A sheet that does not exist (or no workbook to look in) is null: #REF!, as in Excel.
+ */
+function targetOf(sheet: WorkbookSheet, token: string): [WorkbookSheet | null, string] {
+  const trimmed = token.trim()
+  const bang = trimmed.lastIndexOf('!')
+  if (bang <= 0) return [sheet, trimmed]
+  const named = trimmed.slice(0, bang)
+  const name = named.startsWith("'") && named.endsWith("'") ? named.slice(1, -1).replace(/''/g, "'") : named
+  const rest = trimmed.slice(bang + 1)
+  if (name.toLowerCase() === sheet.name.toLowerCase()) return [sheet, rest]
+  const found = formulaWorkbook?.sheets.find(each => each.name.toLowerCase() === name.toLowerCase()) ?? null
+  return [found, rest]
+}
+
+/** A plain or sheet-qualified cell or range (A1, $A$1:B9, Costs!B4, 'Q1 plan'!A1:A9). */
+const REFERENCE = new RegExp(String.raw`^(?:${SHEET_PREFIX})?\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?$`, 'i')
+
+export function evaluateFormula(sheet: WorkbookSheet, formula: string, workbook?: FormulaWorkbook): string {
+  return inWorkbook(workbook, () => evaluateFormulaHere(sheet, formula))
+}
+
+function evaluateFormulaHere(sheet: WorkbookSheet, formula: string): string {
   if (formulaEvaluationDepth >= MAX_FORMULA_EVALUATION_DEPTH) return '#REF!'
   formulaEvaluationDepth += 1
   try {
@@ -1505,8 +1553,7 @@ export function evaluateFormula(sheet: WorkbookSheet, formula: string): string {
  * (caught by the engine-agnostic golden suite against Univer's engine).
  */
 function numericArgValues(sheet: WorkbookSheet, arg: string): string[] {
-  const normalized = arg.replace(/\$/g, '')
-  if (/^[A-Z]+\d+(?::[A-Z]+\d+)?$/i.test(normalized)) {
+  if (REFERENCE.test(arg.trim())) {
     return expandRange(sheet, arg)
   }
   const evaluated = evaluateExpressionString(sheet, arg)
@@ -1518,11 +1565,12 @@ function formulaArgumentError(
   arg: string,
 ): string | null {
   const trimmed = arg.trim()
-  const normalized = trimmed.replace(/\$/g, '')
-  if (/^[A-Z]+\d+(?::[A-Z]+\d+)?$/i.test(normalized)) {
-    for (const key of cellKeysInRange(normalized)) {
-      if (sheet.cells[key]?.kind !== 'formula') continue
-      const value = rawCellValue(sheet, key)
+  if (REFERENCE.test(trimmed)) {
+    const [target, range] = targetOf(sheet, trimmed)
+    if (!target) return '#REF!'
+    for (const key of cellKeysInRange(range.replace(/\$/g, ''))) {
+      if (target.cells[key]?.kind !== 'formula') continue
+      const value = rawCellValue(target, key)
       if (isFormulaError(value)) return value
     }
     return null
@@ -1659,7 +1707,7 @@ function tokenizeExpression(input: string): ExpressionToken[] | null {
       index += errorMatch[0].length
       continue
     }
-    const rangeMatch = /^\$?[A-Z]+\$?\d+:\$?[A-Z]+\$?\d+/i.exec(
+    const rangeMatch = new RegExp(String.raw`^(?:${SHEET_PREFIX})?\$?[A-Z]+\$?\d+:\$?[A-Z]+\$?\d+`, 'i').exec(
       input.slice(index),
     )
     if (rangeMatch) {
@@ -1667,7 +1715,7 @@ function tokenizeExpression(input: string): ExpressionToken[] | null {
       index += rangeMatch[0].length
       continue
     }
-    const refMatch = /^\$?[A-Z]+\$?\d+(?![A-Z0-9(])/i.exec(input.slice(index))
+    const refMatch = new RegExp(String.raw`^(?:${SHEET_PREFIX})?\$?[A-Z]+\$?\d+(?![A-Z0-9(])`, 'i').exec(input.slice(index))
     if (refMatch) {
       tokens.push({ type: 'ref', text: refMatch[0].replace(/\$/g, '') })
       index += refMatch[0].length
@@ -1744,9 +1792,10 @@ function evaluateExpressionString(
     position += 1
     if (token.type === 'number' || token.type === 'string') return token.text
     if (token.type === 'ref') {
-      const positionKey = parseCellKey(token.text)
-      return positionKey
-        ? rawCellValue(sheet, cellKey(positionKey.row, positionKey.column))
+      const [target, ref] = targetOf(sheet, token.text)
+      const positionKey = target ? parseCellKey(ref) : null
+      return target && positionKey
+        ? rawCellValue(target, cellKey(positionKey.row, positionKey.column))
         : '#REF!'
     }
     if (token.type === 'range') {
@@ -1844,13 +1893,16 @@ function countIf(sheet: WorkbookSheet, args: string[]): string {
 
 function sumIf(sheet: WorkbookSheet, args: string[]): string {
   const [rangeArg = '', criteriaArg = '', sumRangeArg] = args
-  const rangeKeys = cellKeysInRange(rangeArg.trim())
+  const [rangeSheet, range] = targetOf(sheet, rangeArg)
+  const [sumSheet, sumRange] = sumRangeArg ? targetOf(sheet, sumRangeArg) : [rangeSheet, range]
+  if (!rangeSheet || !sumSheet) return '#REF!'
+  const rangeKeys = cellKeysInRange(range)
   const criteria = resolveCriteriaArg(sheet, criteriaArg)
-  const sumKeys = sumRangeArg ? cellKeysInRange(sumRangeArg.trim()) : rangeKeys
+  const sumKeys = sumRangeArg ? cellKeysInRange(sumRange) : rangeKeys
   let total = 0
   rangeKeys.forEach((key, idx) => {
-    if (matchesCriteria(rawCellValue(sheet, key), criteria)) {
-      total += Number(rawCellValue(sheet, sumKeys[idx] ?? key)) || 0
+    if (matchesCriteria(rawCellValue(rangeSheet, key), criteria)) {
+      total += Number(rawCellValue(sumSheet, sumKeys[idx] ?? key)) || 0
     }
   })
   return String(total)
@@ -1858,13 +1910,16 @@ function sumIf(sheet: WorkbookSheet, args: string[]): string {
 
 function averageIf(sheet: WorkbookSheet, args: string[]): string {
   const [rangeArg = '', criteriaArg = '', avgRangeArg] = args
-  const rangeKeys = cellKeysInRange(rangeArg.trim())
+  const [rangeSheet, range] = targetOf(sheet, rangeArg)
+  const [avgSheet, avgRange] = avgRangeArg ? targetOf(sheet, avgRangeArg) : [rangeSheet, range]
+  if (!rangeSheet || !avgSheet) return '#REF!'
+  const rangeKeys = cellKeysInRange(range)
   const criteria = resolveCriteriaArg(sheet, criteriaArg)
-  const avgKeys = avgRangeArg ? cellKeysInRange(avgRangeArg.trim()) : rangeKeys
+  const avgKeys = avgRangeArg ? cellKeysInRange(avgRange) : rangeKeys
   const matchedValues: number[] = []
   rangeKeys.forEach((key, idx) => {
-    if (matchesCriteria(rawCellValue(sheet, key), criteria)) {
-      const v = Number(rawCellValue(sheet, avgKeys[idx] ?? key))
+    if (matchesCriteria(rawCellValue(rangeSheet, key), criteria)) {
+      const v = Number(rawCellValue(avgSheet, avgKeys[idx] ?? key))
       if (Number.isFinite(v)) matchedValues.push(v)
     }
   })
@@ -2025,6 +2080,10 @@ function sanitizeAgentCellChanges(
 }
 
 function expandRange(sheet: WorkbookSheet, token: string): string[] {
+  if (REFERENCE.test(token.trim()) && token.includes('!')) {
+    const [target, range] = targetOf(sheet, token)
+    return target ? expandRange(target, range) : ['#REF!']
+  }
   const normalizedToken = token.replace(/\$/g, '')
   const range = /^([A-Z]+[0-9]+):([A-Z]+[0-9]+)$/i.exec(normalizedToken)
   if (!range) {
@@ -2149,7 +2208,9 @@ function compareValues(left: number | string, right: number | string): number {
 
 function vlookup(sheet: WorkbookSheet, args: string[]): string {
   const [lookupArg, rangeArg, columnArg] = args
-  const bounds = parseRange(rangeArg ?? '')
+  const [table, tableRange] = targetOf(sheet, rangeArg ?? '')
+  if (!table) return '#REF!'
+  const bounds = parseRange(tableRange)
   const targetColumnOffset = Math.max(
     0,
     (Number(resolveTextArg(sheet, columnArg ?? '1')) || 1) - 1,
@@ -2157,9 +2218,9 @@ function vlookup(sheet: WorkbookSheet, args: string[]): string {
   if (!bounds) return '#VALUE'
   const lookupValue = resolveTextArg(sheet, lookupArg ?? '')
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
-    if (rawCellValue(sheet, cellKey(row, bounds.start.column)) === lookupValue) {
+    if (rawCellValue(table, cellKey(row, bounds.start.column)) === lookupValue) {
       return rawCellValue(
-        sheet,
+        table,
         cellKey(row, bounds.start.column + targetColumnOffset),
       )
     }
@@ -2237,12 +2298,14 @@ function rawCellValue(sheet: WorkbookSheet, key: string): string {
   // stack, following it again would loop forever. Return #REF! instead. A
   // long acyclic chain (A1→A2→…→A100) never re-enters the same key, so it is
   // not affected — unlike the old fixed depth cap, which false-#REF!'d it.
-  if (evaluatingCells.has(key)) return '#REF!'
-  evaluatingCells.add(key)
+  // Keyed by sheet as well: Costs!A1 and Plan!A1 are different cells.
+  const where = `${sheet.id}!${key}`
+  if (evaluatingCells.has(where)) return '#REF!'
+  evaluatingCells.add(where)
   try {
-    return evaluateFormula(sheet, cell.value)
+    return evaluateFormulaHere(sheet, cell.value)
   } finally {
-    evaluatingCells.delete(key)
+    evaluatingCells.delete(where)
   }
 }
 

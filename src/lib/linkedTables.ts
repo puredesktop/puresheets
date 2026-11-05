@@ -22,7 +22,7 @@ export function workbookLinkedTables(
           Object.entries(sheet.cells).map(([key, cell]) => [
             key,
             {
-              text: displayCellValue(sheet, key),
+              text: displayCellValue(sheet, key, document.workbook),
               bold: cell.style?.bold,
               italic: cell.style?.italic,
               color: cell.style?.textColor,

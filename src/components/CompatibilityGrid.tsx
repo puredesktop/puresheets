@@ -7,6 +7,7 @@ import {
   cellsInRange,
   columnLabel,
   displayCellValue,
+  type FormulaWorkbook,
   isCellLocked,
   isFormulaError,
   parseCellKey,
@@ -30,6 +31,7 @@ import type { CellStyle, WorkbookSheet } from '../types'
  */
 export function CompatibilityGrid({
   sheet,
+  workbook,
   visible,
   gridTemplate,
   visibleRows,
@@ -44,6 +46,8 @@ export function CompatibilityGrid({
   onSelectRange,
 }: {
   sheet: WorkbookSheet
+  /** The whole workbook, so a formula can read other sheets (Costs!B4). */
+  workbook?: FormulaWorkbook
   visible: boolean
   gridTemplate: string
   visibleRows: number[]
@@ -79,7 +83,7 @@ export function CompatibilityGrid({
     for (const rule of sheet.conditionalFormats ?? []) {
       for (const key of cellsInRange(rule.range)) {
         if (map.has(key)) continue
-        const style = conditionalStyleForCell(sheet, key)
+        const style = conditionalStyleForCell(sheet, key, workbook)
         if (style) map.set(key, style)
       }
     }
@@ -118,6 +122,7 @@ export function CompatibilityGrid({
           key={row}
           row={row}
           sheet={sheet}
+          workbook={workbook}
           selectedCell={selectedCell}
           selectedRowHeader={selectedHeaderCoordinates.rows.has(row)}
           frozenRow={Boolean(sheet.frozenRows && row === 0)}
@@ -143,6 +148,7 @@ function RowFragment({
   frozenRow,
   row,
   sheet,
+  workbook,
   selectedCell,
   selectedRowHeader,
   onPaste,
@@ -160,6 +166,7 @@ function RowFragment({
   frozenRow: boolean
   row: number
   sheet: WorkbookSheet
+  workbook?: FormulaWorkbook
   selectedCell: string
   selectedRowHeader: boolean
   selectedRange: string | null
@@ -185,7 +192,7 @@ function RowFragment({
       {Array.from({ length: sheet.columnCount }, (_, column) => {
         const key = cellKey(row, column)
         const cell = sheet.cells[key]
-        const displayValue = displayCellValue(sheet, key)
+        const displayValue = displayCellValue(sheet, key, workbook)
         const formulaError = isFormulaError(displayValue)
         const comment = sheet.comments?.[key]
         const invalidMessage = invalidCells.get(key)
