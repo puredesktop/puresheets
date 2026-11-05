@@ -24,7 +24,7 @@ export async function readWorkbookDatasets(path: string, readText: (path: string
         rows = Math.max(rows, position.row + 1)
         columns = Math.max(columns, position.column + 1)
         if (cell.kind === 'formula') {
-          const value = computedCellValue(original, key)
+          const value = computedCellValue(original, key, document.workbook)
           if (/^#[A-Z0-9/?!]+$/i.test(value.trim())) {
             throw new Error(`Formula at ${key} could not be exported. Check it in PureSheets or import a values-only dataset.`)
           }

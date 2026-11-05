@@ -154,7 +154,7 @@ export async function readRangeHandler(
     .filter(key => sheet.cells[key])
     .map(key => {
       const cell = sheet.cells[key]
-      const computed = computedCellValue(sheet, key)
+      const computed = computedCellValue(sheet, key, document.workbook)
       return {
         cell: key,
         value: cell.value,

@@ -1954,7 +1954,7 @@ export function PureSheetsShell({
       sheet => sheet.id === sheetId,
     )
     if (!sheet) throw Error('The sheet was removed before export.')
-    await writeTextFile(path, csvFromSheet(sheet))
+    await writeTextFile(path, csvFromSheet(sheet, undefined, documentRef.current.workbook))
     setStatusMessage(
       `Exported ${activeSheet.name} to ${fileNameFromPath(path)}`,
     )
@@ -2360,7 +2360,7 @@ export function PureSheetsShell({
       const listOptions = Array.from(
         new Set(
           cellsInRange(range)
-            .map(key => computedCellValue(activeSheet, key).trim())
+            .map(key => computedCellValue(activeSheet, key, document.workbook).trim())
             .filter(Boolean),
         ),
       )
@@ -2417,7 +2417,7 @@ export function PureSheetsShell({
   const selectedDisplay =
     univerSelection?.cell === selectedCell
       ? univerSelection.displayValue
-      : displayCellValue(activeSheet, selectedCell)
+      : displayCellValue(activeSheet, selectedCell, document.workbook)
   const selectedFormulaError = isFormulaError(selectedDisplay)
 
   const importUniverSnapshot = useCallback(
@@ -2515,7 +2515,7 @@ export function PureSheetsShell({
   const invalidFlagsBySheet = useMemo(() => {
     const flagged: Record<string, InvalidCellFlag[]> = {}
     for (const sheet of document.workbook.sheets) {
-      const flags = invalidCellFlagsForSheet(sheet)
+      const flags = invalidCellFlagsForSheet(sheet, document.workbook)
       if (flags.length) flagged[sheet.id] = flags
     }
     return flagged
@@ -2539,7 +2539,7 @@ export function PureSheetsShell({
     if (keys.length < 2) return null
     const numbers: number[] = []
     for (const key of keys) {
-      const value = computedCellValue(activeSheet, key)
+      const value = computedCellValue(activeSheet, key, document.workbook)
       if (value.trim() === '') continue
       const numeric = Number(value)
       if (Number.isFinite(numeric)) numbers.push(numeric)
@@ -2811,6 +2811,7 @@ export function PureSheetsShell({
                 {showCompatibilityGrid && (
                   <CompatibilityGrid
                     sheet={activeSheet}
+                    workbook={document.workbook}
                     visible={showCompatibilityGrid}
                     gridTemplate={gridTemplate}
                     visibleRows={visibleRows}

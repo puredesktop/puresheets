@@ -3,6 +3,7 @@ import {
   computedCellValue,
   normalizeRangeToken,
   parseCellKey,
+  type FormulaWorkbook,
 } from './workbookModel'
 import type {
   CellStyle,
@@ -125,12 +126,13 @@ export function validateValue(
 /** Flag map for the whole sheet: cell key → validation message. */
 export function invalidCellsForSheet(
   sheet: WorkbookSheet,
+  workbook?: FormulaWorkbook,
 ): Map<string, string> {
   const flagged = new Map<string, string>()
   for (const rule of sheet.validations ?? []) {
     for (const key of cellsInRange(rule.range)) {
       if (flagged.has(key)) continue
-      const value = computedCellValue(sheet, key)
+      const value = computedCellValue(sheet, key, workbook)
       const result = validateValue(rule, value)
       if (!result.valid) {
         flagged.set(key, result.message ?? 'Invalid value')
@@ -158,10 +160,11 @@ export interface InvalidCellFlag {
  */
 export function invalidCellFlagsForSheet(
   sheet: WorkbookSheet,
+  workbook?: FormulaWorkbook,
 ): InvalidCellFlag[] {
-  return [...invalidCellsForSheet(sheet)].map(([cell, message]) => ({
+  return [...invalidCellsForSheet(sheet, workbook)].map(([cell, message]) => ({
     cell,
-    value: computedCellValue(sheet, cell),
+    value: computedCellValue(sheet, cell, workbook),
     message,
   }))
 }
@@ -240,13 +243,14 @@ export function conditionMatches(
 export function conditionalStyleForCell(
   sheet: WorkbookSheet,
   key: string,
+  workbook?: FormulaWorkbook,
 ): CellStyle | undefined {
   const rules = sheet.conditionalFormats
   if (!rules?.length) return undefined
   let merged: CellStyle | undefined
   for (const rule of rules) {
     if (!cellsInRange(rule.range).includes(key)) continue
-    const value = computedCellValue(sheet, key)
+    const value = computedCellValue(sheet, key, workbook)
     if (!conditionMatches(rule.condition, value)) continue
     merged = { ...merged, ...rule.style }
   }
