@@ -4,8 +4,9 @@
  * 2. COUNTIF / SUMIF / AVERAGEIF / RANK
  * 3. Cascaded IF formulas that depend on arithmetic (the "Bronze bug")
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  computedCellValue,
   createBlankSheet,
   evaluateFormula,
   upsertCell,
@@ -464,5 +465,55 @@ describe('expression parser correctness', () => {
     s = upsertCell(s, 'B1', '0')
     s = upsertCell(s, 'C1', '=A1/B1')
     expect(evaluateFormula(s, '=C1+1')).toBe('#DIV/0!')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Each cell computes once per workbook state (the memo in rawCellValue)
+// ---------------------------------------------------------------------------
+
+describe('formula results are kept for one workbook state', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('reads a cell named many times over only once', () => {
+    // A40 names A39 twice, which names A38 twice, …: 2^39 reads without the memo.
+    let s = createBlankSheet('id', 'Test')
+    s = upsertCell(s, 'A1', '1')
+    for (let row = 2; row <= 40; row++) s = upsertCell(s, `A${row}`, `=A${row - 1}+A${row - 1}`)
+    expect(computedCellValue(s, 'A40')).toBe(String(2 ** 39))
+  })
+
+  it('a new state is read afresh', () => {
+    let s = createBlankSheet('id', 'Test')
+    s = upsertCell(s, 'A1', '2')
+    s = upsertCell(s, 'A2', '=A1*10')
+    expect(computedCellValue(s, 'A2')).toBe('20')
+    const edited = upsertCell(s, 'A1', '3')
+    expect(computedCellValue(edited, 'A2')).toBe('30')
+    expect(computedCellValue(s, 'A2')).toBe('20')
+  })
+
+  it('cells in a cycle give what a fresh read gives, whichever is read first', () => {
+    let s = createBlankSheet('id', 'Test')
+    s = upsertCell(s, 'A1', '=IFERROR(B1,5)')
+    s = upsertCell(s, 'B1', '=A1')
+    const fresh = (key: string): string => computedCellValue({ ...s }, key)
+    expect(fresh('A1')).toBe('5')
+    expect(fresh('B1')).toBe('5')
+    // Reading A1 first meets B1 mid-cycle (#REF!); that answer must not stick to B1.
+    expect(computedCellValue(s, 'A1')).toBe(fresh('A1'))
+    expect(computedCellValue(s, 'B1')).toBe(fresh('B1'))
+  })
+
+  it('NOW() and TODAY() are never kept', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T09:00:00Z'))
+    let s = createBlankSheet('id', 'Test')
+    s = upsertCell(s, 'A1', '=NOW()')
+    s = upsertCell(s, 'A2', '=TODAY()')
+    expect(computedCellValue(s, 'A1')).toBe('2026-01-01T09:00:00.000Z')
+    vi.setSystemTime(new Date('2026-01-02T10:00:00Z'))
+    expect(computedCellValue(s, 'A1')).toBe('2026-01-02T10:00:00.000Z')
+    expect(computedCellValue(s, 'A2')).toBe('2026-01-02')
   })
 })
