@@ -868,18 +868,27 @@ const ToolbarHeader = styled.div`
 `
 const Sections = styled.div`
   display: flex;
-  gap: 4px;
+  align-self: stretch;
+  gap: 16px;
 `
+/** The tool groups are tabs: words, the open one in ink with a rule under it in Sheets' colour, as in every app. */
 const SectionButton = styled(ToolTextButton)`
   && {
-    border-radius: var(--pure-chrome-radius, 3px);
-    padding: 0 12px;
+    border-radius: 0;
+    padding: 0 2px;
+    background: transparent;
+    box-shadow: none;
     font-weight: 500;
     color: var(--pure-chrome-soft);
   }
+  &&:hover {
+    background: transparent;
+    color: var(--sheets-ink);
+  }
   &&[aria-selected='true'] {
     color: var(--sheets-ink);
-    background: var(--pure-chrome-selection);
+    background: transparent;
+    box-shadow: inset 0 -2px 0 var(--p-text);
     font-weight: 600;
   }
   &:focus-visible {

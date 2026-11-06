@@ -2970,22 +2970,27 @@ const Shell = styled.div`
 /* The title, the tool tabs and the quick actions share one line; the tools for the open tab run full width under it. */
 const TopBar = styled.header`
   display: grid;
-  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   flex-shrink: 0;
-  gap: 10px 24px;
+  gap: 10px 20px;
   padding: 14px var(--pure-chrome-inset) 12px;
   border-bottom: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
 `
 
+/* The title is as wide as its words, closed by a hairline, so the tabs start right after it rather than floating mid-bar. */
 const TitleBlock = styled.div`
   min-width: 0;
+  padding-right: 20px;
+  border-right: 1px solid var(--pure-chrome-line);
 `
 
 const FileNameInput = styled.input`
-  width: 100%;
-  min-width: 0;
+  field-sizing: content;
+  width: auto;
+  min-width: 6ch;
+  max-width: 32ch;
   overflow: hidden;
   margin: 0;
   padding: 0;
