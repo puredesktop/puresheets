@@ -200,7 +200,7 @@ const NotesCount = styled.span`
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: 2px;
   background: var(--pure-chrome-accent);
   color: var(--pure-chrome-on-accent);
   font-family: var(--platform-typography-font-family-mono);

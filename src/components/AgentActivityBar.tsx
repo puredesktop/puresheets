@@ -137,7 +137,7 @@ const EntryRow = styled.div`
   gap: 10px;
   align-items: baseline;
   padding: 4px 8px;
-  border-radius: 5px;
+  border-radius: var(--pure-chrome-radius, 3px);
 
   &:hover {
     background: var(--pure-chrome-hover);

@@ -303,7 +303,7 @@ const OptionButton = styled.button<{ $active?: boolean }>`
   padding: 0 8px;
   border: 1px solid
     ${({ $active }) => ($active ? 'var(--pure-chrome-soft)' : 'var(--pure-chrome-line)')};
-  border-radius: 7px;
+  border-radius: var(--pure-chrome-radius, 3px);
   background: ${({ $active }) =>
     $active ? 'var(--pure-chrome-selection)' : 'var(--pure-chrome-surface)'};
   color: var(--platform-colors-text);
@@ -333,7 +333,7 @@ const ApplyButton = styled.button`
   height: var(--pure-chrome-control-height);
   padding: 0 10px;
   border: 1px solid var(--pure-chrome-accent);
-  border-radius: 7px;
+  border-radius: var(--pure-chrome-radius, 3px);
   background: var(--pure-chrome-accent);
   color: var(--pure-chrome-on-accent);
   font-size: 12px;
@@ -344,7 +344,7 @@ const QuietButton = styled.button`
   height: var(--pure-chrome-control-height);
   padding: 0 10px;
   border: 1px solid var(--pure-chrome-line);
-  border-radius: 7px;
+  border-radius: var(--pure-chrome-radius, 3px);
   background: var(--pure-chrome-surface);
   color: var(--platform-colors-text);
   font-size: 12px;

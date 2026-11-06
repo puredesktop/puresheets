@@ -843,7 +843,7 @@ const CommentBadge = styled.span`
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
-  border-radius: 999px;
+  border-radius: 2px;
   background: var(--pure-chrome-accent);
   color: var(--pure-chrome-on-accent);
   font-family: var(--platform-typography-font-family-mono);
@@ -873,7 +873,7 @@ const Sections = styled.div`
 `
 const SectionButton = styled(ToolTextButton)`
   && {
-    border-radius: 7px;
+    border-radius: var(--pure-chrome-radius, 3px);
     padding: 0 12px;
     font-weight: 500;
     color: var(--pure-chrome-soft);
@@ -924,7 +924,7 @@ const ColorControl = styled.label`
   min-width: var(--pure-chrome-control-height);
   height: var(--pure-chrome-control-height);
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--pure-chrome-radius, 3px);
   background: transparent;
   color: var(--sheets-ink);
   font-size: 12px;

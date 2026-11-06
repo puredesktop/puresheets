@@ -305,7 +305,7 @@ const CellReference = styled.div.attrs(fieldChrome)`
     background: transparent;
     color: var(--pure-chrome-soft);
   }
-  border-radius: 6px;
+  border-radius: var(--pure-chrome-radius, 3px);
   font-family: var(--sheets-mono);
   font-weight: 700;
 `
@@ -329,7 +329,7 @@ const FormulaStack = styled.div`
 const FormulaInput = styled.input.attrs(fieldChrome)<{ $mirrored?: boolean }>`
   /* Outrank the shared field rule regardless of stylesheet injection order. */
   && {
-    border-radius: 6px;
+    border-radius: var(--pure-chrome-radius, 3px);
     padding-left: 36px;
     background: ${({ $mirrored }) =>
       $mirrored ? 'transparent' : 'var(--pure-chrome-surface)'};
@@ -372,7 +372,7 @@ const ReferenceSpan = styled.span<{ $color: string }>`
 `
 
 const RangeInput = styled.input.attrs(fieldChrome)`
-  border-radius: 6px;
+  border-radius: var(--pure-chrome-radius, 3px);
   font-family: var(--sheets-mono);
   font-weight: 700;
 `
@@ -387,7 +387,7 @@ const SuggestionList = styled.div`
   min-width: 0;
   padding: 4px;
   border: 1px solid var(--pure-chrome-line);
-  border-radius: 6px;
+  border-radius: var(--pure-chrome-radius, 3px);
   background: var(--pure-chrome-surface);
   box-shadow: var(--platform-shadow-md);
 `
@@ -397,7 +397,7 @@ const SuggestionItem = styled.button<{ $active?: boolean }>`
   gap: 1px;
   padding: 5px 8px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--pure-chrome-radius, 3px);
   background: ${({ $active }) =>
     $active ? 'var(--pure-chrome-selection)' : 'transparent'};
   text-align: left;

@@ -39,7 +39,7 @@ export const IconButton = styled.button.attrs(chrome('toolbar-control'))`
     max-width: 220px;
     padding: 5px 7px;
     border: 1px solid var(--platform-colors-border);
-    border-radius: 6px;
+    border-radius: var(--pure-chrome-radius, 3px);
     background: var(--platform-colors-popover);
     box-shadow: var(--platform-shadow-md);
     color: var(--platform-colors-popover-text);
