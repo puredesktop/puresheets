@@ -853,14 +853,13 @@ const CommentBadge = styled.span`
   pointer-events: none;
 `
 
+/* Its parts are laid out by the bar it sits in: the header beside the title, the tool rows and Find full width below. */
 const Toolbar = styled.div`
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  gap: 10px;
+  display: contents;
 `
 
 const ToolbarHeader = styled.div`
+  grid-column: 2;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -900,6 +899,7 @@ const QuickActions = styled.div`
   gap: 4px;
 `
 const ToolbarRow = styled.div`
+  grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -967,6 +967,7 @@ const ColorControl = styled.label`
 `
 
 const FindBox = styled.div`
+  grid-column: 1 / -1;
   &[hidden] {
     display: none;
   }

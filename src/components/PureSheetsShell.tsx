@@ -2967,11 +2967,13 @@ const Shell = styled.div`
 `
 
 // The document title and grouped commands share a full-width, quiet header.
+/* The title, the tool tabs and the quick actions share one line; the tools for the open tab run full width under it. */
 const TopBar = styled.header`
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  align-items: center;
   flex-shrink: 0;
-  gap: 12px;
+  gap: 10px 24px;
   padding: 14px var(--pure-chrome-inset) 12px;
   border-bottom: 1px solid var(--pure-chrome-line);
   background: var(--pure-chrome-bar);
@@ -2979,7 +2981,6 @@ const TopBar = styled.header`
 
 const TitleBlock = styled.div`
   min-width: 0;
-  padding-top: 2px;
 `
 
 const FileNameInput = styled.input`
