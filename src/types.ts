@@ -9,8 +9,21 @@ export interface CellStyle {
   textColor?: string
   fillColor?: string
   border?: boolean
+  /**
+   * Thin borders on only some sides (an imported Excel underline, say). Unset
+   * with `border: true` means all four; setting `border` clears this.
+   */
+  borderSides?: Array<'top' | 'right' | 'bottom' | 'left'>
   align?: 'left' | 'center' | 'right'
+  /** Vertical alignment; unset = middle. */
+  verticalAlign?: 'top' | 'middle' | 'bottom'
   numberFormat?: 'text' | 'number' | 'currency' | 'percent' | 'date'
+  /**
+   * The exact number format code an Excel import carried (`#,##0.0;[Red]-#,##0.0`),
+   * kept so it shows and exports as it was. `numberFormat` still names its family
+   * for the toolbar; setting `numberFormat` or `decimals` clears this.
+   */
+  numberPattern?: string
   /**
    * Fixed fraction digits for number/currency/percent formats (the decimal
    * increase/decrease controls). Unset = the format's default (currency and
@@ -92,6 +105,8 @@ export interface WorkbookSheet {
   rowHeights?: Record<string, number>
   frozenRows?: number
   frozenColumns?: number
+  /** Merged ranges in A1 form (`A1:C1`); the top-left cell holds the value. */
+  merges?: string[]
   filterRow?: number
   filterColumn?: number
   /** Whether the first row is a header that stays pinned/visible while

@@ -42,6 +42,9 @@ const readClipboard = vi.fn()
 const writeClipboard = vi.fn()
 const readBinaryFile = vi.fn()
 const openImportFile = vi.fn()
+const writeBinaryFile = vi.fn()
+const chooseSaveFilePath = vi.fn()
+const fileExists = vi.fn()
 const updatePureSheetsSettings = vi.fn()
 const createPlatformDraft = vi.fn(async (..._args: unknown[]) => ({
   path: '/workspace/PureDrafts/Untitled — Test.sheets',
@@ -85,6 +88,9 @@ vi.mock('@purescience/platform-ui/bridge/workspace', () => ({ updateCurrentWorks
 
 vi.mock('../bridge/platformBridge', () => ({
   openImportFile: (...args: unknown[]) => openImportFile(...args),
+  writeBinaryFile: (...args: unknown[]) => writeBinaryFile(...args),
+  chooseSaveFilePath: (...args: unknown[]) => chooseSaveFilePath(...args),
+  fileExists: (...args: unknown[]) => fileExists(...args),
   readBinaryFile: (...args: unknown[]) => readBinaryFile(...args),
   readClipboard: (...args: unknown[]) => readClipboard(...args),
   readTextFile: (...args: unknown[]) => readTextFile(...args),
@@ -2458,5 +2464,78 @@ describe('live range clipboard publication', () => {
       await flushAsync()
     })
     expect(writeClipboard).not.toHaveBeenCalled()
+  })
+})
+
+describe('Excel in and out', () => {
+  async function workbookWithMerge() {
+    const excel = new ExcelJS.Workbook()
+    const sheet = excel.addWorksheet('Plan')
+    sheet.addRows([['Quarter one'], ['Cost', 40], ['Total', null]])
+    sheet.getCell('B3').value = { formula: 'SUM(B2:B2)', result: 40 }
+    sheet.mergeCells('A1:B1')
+    excel.addWorksheet('Odds').getCell('A1').value = { text: 'site', hyperlink: 'https://pure.science' }
+    return Buffer.from(await excel.xlsx.writeBuffer()).toString('base64')
+  }
+
+  async function savedWorkbook(): Promise<ExcelJS.Workbook> {
+    const [, base64] = writeBinaryFile.mock.calls.at(-1) as [string, string]
+    const saved = new ExcelJS.Workbook()
+    await saved.xlsx.load(Uint8Array.from(Buffer.from(base64, 'base64')).buffer)
+    return saved
+  }
+
+  it('opens an Excel workbook and lists what did not come over in the notice', async () => {
+    readBinaryFile.mockResolvedValue({ base64: await workbookWithMerge(), truncated: false })
+    render(<PureSheetsShell initialDocument={createBlankWorkbook()} />)
+    await act(async () => { await flushAsync() })
+    await act(async () => { await agentContext.openWorkbook!('/work/plan.xlsx'); await flushAsync() })
+    expect(agentContext.document?.workbook.sheets[0]?.merges).toEqual(['A1:B1'])
+    const notice = document.querySelector('[aria-label="Import warnings"]')
+    expect(notice?.textContent).toContain('Imported with limitations')
+    expect(notice?.textContent).toContain('Odds: links (kept as their text).')
+  })
+
+  it('saves as Excel from the Data menu and from the agent tool through the same writer', async () => {
+    readBinaryFile.mockResolvedValue({ base64: await workbookWithMerge(), truncated: false })
+    render(<PureSheetsShell initialDocument={createBlankWorkbook()} />)
+    await act(async () => { await flushAsync() })
+    await act(async () => { await agentContext.openWorkbook!('/work/plan.xlsx'); await flushAsync() })
+
+    chooseSaveFilePath.mockResolvedValue('/work/plan copy.xlsx')
+    const dataMenu = document.querySelector('button[aria-label="Import or export data"]')
+    if (!(dataMenu instanceof HTMLButtonElement)) throw new Error('Data menu not found')
+    await act(async () => { dataMenu.click() })
+    const saveOption = Array.from(document.querySelectorAll('button')).find(
+      button => button.textContent === 'Save as Excel (.xlsx)…',
+    )
+    if (!(saveOption instanceof HTMLButtonElement)) throw new Error('Save as Excel option not found')
+    await act(async () => { saveOption.click(); await flushAsync(64) })
+    await vi.waitFor(() => expect(writeBinaryFile).toHaveBeenCalledTimes(1))
+    expect(writeBinaryFile.mock.calls[0][0]).toBe('/work/plan copy.xlsx')
+    const fromMenu = await savedWorkbook()
+    expect(fromMenu.worksheets.map(sheet => sheet.name)).toEqual(['Plan', 'Odds'])
+    expect((fromMenu.getWorksheet('Plan')!.model as { merges: string[] }).merges).toEqual(['A1:B1'])
+    expect(fromMenu.getWorksheet('Plan')!.getCell('B3').value).toMatchObject({ formula: 'SUM(B2:B2)', result: 40 })
+
+    fileExists.mockResolvedValue(false)
+    let receipt: Awaited<ReturnType<NonNullable<SheetsAgentToolContext['saveAsXlsx']>>> | undefined
+    await act(async () => { receipt = await agentContext.saveAsXlsx!('/work/for-finance.xlsx', false) })
+    expect(receipt).toEqual({ path: '/work/for-finance.xlsx', sheets: ['Plan', 'Odds'], warnings: [] })
+    const fromTool = await savedWorkbook()
+    expect(fromTool.worksheets.map(sheet => sheet.name)).toEqual(['Plan', 'Odds'])
+    expect((fromTool.getWorksheet('Plan')!.model as { merges: string[] }).merges).toEqual(['A1:B1'])
+    expect(fromTool.getWorksheet('Plan')!.getCell('B3').value).toEqual(fromMenu.getWorksheet('Plan')!.getCell('B3').value)
+  })
+
+  it('will not replace an existing file unless told to', async () => {
+    render(<PureSheetsShell initialDocument={createBlankWorkbook('Budget')} />)
+    await act(async () => { await flushAsync() })
+    fileExists.mockResolvedValue(true)
+    await expect(agentContext.saveAsXlsx!('/work/plan.xlsx', false)).rejects.toThrow(/already exists/)
+    expect(writeBinaryFile).not.toHaveBeenCalled()
+    await expect(agentContext.saveAsXlsx!('/work/plan.csv', true)).rejects.toThrow(/must end in \.xlsx/)
+    await act(async () => { await agentContext.saveAsXlsx!('/work/plan.xlsx', true) })
+    expect(writeBinaryFile).toHaveBeenCalledWith('/work/plan.xlsx', expect.any(String))
   })
 })

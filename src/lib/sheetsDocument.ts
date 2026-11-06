@@ -157,6 +157,7 @@ function normalizeSheet(input: unknown): WorkbookSheet {
     rowHeights: normalizeNumberRecord(input.rowHeights),
     frozenRows: optionalInteger(input.frozenRows),
     frozenColumns: optionalInteger(input.frozenColumns),
+    merges: normalizeMerges(input.merges),
     filterRow: optionalInteger(input.filterRow),
     filterColumn: optionalInteger(input.filterColumn),
     filterHasHeader:
@@ -243,7 +244,26 @@ function normalizeCellStyle(input: unknown): CellStyle | undefined {
   ) {
     style.numberFormat = input.numberFormat
   }
+  // Carried from Excel imports: the exact format code, partial borders, vertical alignment.
+  if (typeof input.numberPattern === 'string' && input.numberPattern.trim())
+    style.numberPattern = input.numberPattern.slice(0, 256)
+  if (Array.isArray(input.borderSides)) {
+    const sides = (['top', 'right', 'bottom', 'left'] as const).filter(side =>
+      (input.borderSides as unknown[]).includes(side),
+    )
+    if (sides.length) style.borderSides = sides
+  }
+  if (input.verticalAlign === 'top' || input.verticalAlign === 'middle' || input.verticalAlign === 'bottom')
+    style.verticalAlign = input.verticalAlign
   return Object.keys(style).length ? style : undefined
+}
+
+function normalizeMerges(input: unknown): string[] | undefined {
+  if (!Array.isArray(input)) return undefined
+  const merges = input.filter(
+    (merge): merge is string => typeof merge === 'string' && /^[A-Z]+[1-9]\d*:[A-Z]+[1-9]\d*$/i.test(merge),
+  )
+  return merges.length ? merges : undefined
 }
 
 function normalizeNumberRecord(
