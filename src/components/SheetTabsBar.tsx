@@ -159,20 +159,20 @@ const SheetTab = styled.button<{ $active?: boolean }>`
   min-width: 72px;
   flex-shrink: 0;
   height: 30px;
-  border: 1px solid
-    ${({ $active }) => ($active ? 'var(--pure-chrome-line)' : 'transparent')};
-  border-radius: 7px;
-  background: ${({ $active }) =>
-    $active ? 'var(--sheets-accent-bg)' : 'transparent'};
+  border: 0;
+  border-radius: 0;
+  /* The open sheet has the selected look every app shares: a hairline in Sheets' deep colour around a faint ground, words ink. */
+  background: ${({ $active }) => ($active ? 'var(--p-chosen)' : 'transparent')};
+  box-shadow: ${({ $active }) => ($active ? 'var(--p-chosen-edge)' : 'none')};
   padding: 0 10px;
   color: ${({ $active }) =>
-    $active ? 'var(--sheets-accent-text)' : 'var(--pure-chrome-soft)'};
+    $active ? 'var(--sheets-ink)' : 'var(--pure-chrome-soft)'};
   font-size: var(--pure-chrome-ui-size);
   font-weight: ${({ $active }) => ($active ? 600 : 500)};
   white-space: nowrap;
   cursor: pointer;
   &:hover {
-    background: var(--pure-chrome-hover);
+    background: ${({ $active }) => ($active ? 'var(--p-chosen)' : 'var(--pure-chrome-hover)')};
   }
   &:focus-visible {
     outline: 2px solid var(--sheets-accent);

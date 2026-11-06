@@ -1,12 +1,12 @@
 import './heldInRoom'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { WhiteNeutral } from './whiteNeutral'
+import { SheetsStyles } from './ui/styles'
 import './compact-in-room.css'
 
 createRoot(document.getElementById('root')!).render(
   <>
-    <WhiteNeutral />
+    <SheetsStyles />
     <App />
   </>,
 )
