@@ -1,3 +1,11 @@
+/* Follows the desk's theme: each colour is light-dark(its light value, its dark partner), the dark ones the held greys
+   of docs/held-apps.md. A light theme leaves the colour scheme as it was; a dark one says dark, and parts that asked
+   for light take --held-scheme instead. */
+[data-compact-room]:is([data-platform-theme='dark'] *) {
+  color-scheme: dark;
+  --held-scheme: dark;
+}
+
 /* The held look for PureSheets, held in a page (useCompactInRoom). The frame carries data-compact-room only then, and every
    rule here starts from it, so with compact off nothing in this file applies. Only the shell's own bars change; the grid
    is Univer's and stays as it is. Calm enterprise software: one white surface, 1px hairlines (#dde1e7), no tints,
@@ -5,22 +13,22 @@
 
 [data-compact-room],
 [data-compact-room] [class*='PureSheetsShell__Shell-'] {
-  background: #ffffff;
+  background: light-dark(#ffffff, #1c1c1c);
 }
 
 /* Formula bar: white, one hairline under it, fields 28px with a 1px border. */
 [data-compact-room] [class*='FormulaBar__Bar-'] {
   padding-block: 6px;
-  border-bottom: 1px solid #dde1e7;
-  background: #ffffff;
+  border-bottom: 1px solid light-dark(#dde1e7, #3a3a3a);
+  background: light-dark(#ffffff, #1c1c1c);
 }
 [data-compact-room] [class*='FormulaBar__Bar-'] [data-chrome='field'],
 [data-compact-room] [class*='FormulaBar__Bar-'] input {
   height: 28px;
   min-height: 28px;
   border-radius: 3px;
-  border-color: #cdd1d7;
-  background: #ffffff;
+  border-color: light-dark(#cdd1d7, #4a4a4a);
+  background: light-dark(#ffffff, #1c1c1c);
   box-shadow: none;
 }
 [data-compact-room] [class*='FormulaBar__Bar-'] [class*='FormulaBar__CellReference-'][data-chrome='field'] {
@@ -33,8 +41,8 @@
 /* Sheet tabs and the status line: white, one hairline above, flat tabs. */
 [data-compact-room] [class*='SheetTabsBar__BottomBar-'] {
   padding-block: 5px;
-  border-top: 1px solid #dde1e7;
-  background: #ffffff;
+  border-top: 1px solid light-dark(#dde1e7, #3a3a3a);
+  background: light-dark(#ffffff, #1c1c1c);
   box-shadow: none;
 }
 [data-compact-room] [class*='SheetTabsBar__SheetTab-'] {
@@ -44,9 +52,9 @@
 }
 [data-compact-room] [class*='SheetTabsBar__SheetTab-'][aria-selected='true'],
 [data-compact-room] [class*='SheetTabsBar__SheetTab-'][aria-current='true'] {
-  border-color: #cdd1d7;
-  background: #ffffff;
-  color: #2f5d8c;
+  border-color: light-dark(#cdd1d7, #4a4a4a);
+  background: light-dark(#ffffff, #1c1c1c);
+  color: light-dark(#2f5d8c, #7fafe3);
   font-weight: 600;
 }
 [data-compact-room] [class*='SheetTabsBar__BottomBar-'] button {
