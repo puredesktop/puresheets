@@ -55,6 +55,14 @@ export function useSheetsAgentTools(
       if (!open) throw new AgentSheetsToolError('Workbook opening is unavailable.')
       return { content: formatAgentToolJson(await open(path.trim())) }
     },
+    saveWorkbookAsXlsx: async invoke => {
+      const path = invoke.arguments?.path
+      if (typeof path !== 'string' || !path.trim())
+        throw new AgentSheetsToolError('Provide the full path of the .xlsx file to write.')
+      const save = contextRef.current.saveAsXlsx
+      if (!save) throw new AgentSheetsToolError('Saving as Excel is unavailable.')
+      return { content: formatAgentToolJson(await save(path.trim(), invoke.arguments?.overwrite === true)) }
+    },
     completeWorkbook: async () => {
       const complete = contextRef.current.completeWorkbook
       if (!complete)

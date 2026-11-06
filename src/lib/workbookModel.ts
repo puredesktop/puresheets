@@ -457,16 +457,17 @@ export function setCellStyle(
   patch: Partial<NonNullable<SheetCell['style']>>,
 ): WorkbookSheet {
   const current = sheet.cells[key] ?? { value: '', kind: 'blank' as const }
+  const style = { ...current.style, ...patch }
+  // A chosen format or border replaces what an import carried.
+  if (('numberFormat' in patch || 'decimals' in patch) && !('numberPattern' in patch)) delete style.numberPattern
+  if ('border' in patch && !('borderSides' in patch)) delete style.borderSides
   return {
     ...sheet,
     cells: {
       ...sheet.cells,
       [key]: {
         ...current,
-        style: {
-          ...current.style,
-          ...patch,
-        },
+        style,
       },
     },
   }
@@ -719,7 +720,7 @@ function shiftPositionalMetadata(
   delta: 1 | -1,
 ): Pick<
   WorkbookSheet,
-  'comments' | 'validations' | 'protection' | 'conditionalFormats'
+  'comments' | 'validations' | 'protection' | 'conditionalFormats' | 'merges'
 > {
   const comments = shiftCellKeyRecord(sheet.comments, axis, target, delta)
   const validations = (sheet.validations ?? []).flatMap(rule => {
@@ -736,8 +737,16 @@ function shiftPositionalMetadata(
     const range = shiftRangeTokenForAxis(rule.range, axis, target, delta)
     return range ? [{ ...rule, range }] : []
   })
+  // A merge that shrinks to one cell is no merge.
+  const merges = (sheet.merges ?? []).flatMap(merge => {
+    const range = shiftRangeTokenForAxis(merge, axis, target, delta)
+    if (!range) return []
+    const [start, end] = range.split(':')
+    return start === end ? [] : [range]
+  })
   return {
     comments,
+    merges: merges.length ? merges : undefined,
     validations: validations.length ? validations : undefined,
     protection: lockedRanges.length ? { lockedRanges } : undefined,
     conditionalFormats: conditionalFormats.length

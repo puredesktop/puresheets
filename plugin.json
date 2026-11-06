@@ -49,13 +49,34 @@
       "tools": [
         {
           "name": "openWorkbook",
-          "description": "Open an existing .sheets/.sheets.html workbook, or import an .xlsx or a .csv/.tsv from an exact selected path. Use before auditing a spreadsheet supplied by the user; do not audit a blank restored workbook instead. Flushes current edits before switching. Excel and CSV imports create a separate native workbook and preserve the original file. Returns actual sheet title, source path and import warnings; read getSheetsContext and readRange next. Call completeWorkbook after any changes to save a separate deliverable.",
+          "description": "Open an existing .sheets/.sheets.html workbook, or import an Excel .xlsx or a .csv/.tsv from an exact path. Use before auditing a spreadsheet supplied by the user; do not audit a blank restored workbook instead. Flushes current edits before switching. Excel and CSV imports create a separate native workbook and leave the original file as it is. An .xlsx keeps every sheet and its name, values and formulas (cross-sheet ones too), number formats, merged cells, column widths and row heights, bold/italic/fill/font colour/borders/alignment and frozen panes; returns the title, source path and warnings naming anything that did not come over. Read getSheetsContext and readRange next. Call completeWorkbook after any changes to save a separate deliverable.",
           "inputSchema": {
             "type": "object",
             "properties": {
               "path": {
                 "type": "string",
                 "minLength": 1
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "saveWorkbookAsXlsx",
+          "description": "Save a copy of the current workbook as an Excel .xlsx file at an exact path, the same as the menu's Save as Excel. Writes every sheet with its values and formulas, number formats, merged cells, column widths and row heights, cell styles, frozen panes and notes. The workbook stays bound to its own .sheets file; this does not replace completeWorkbook. Refuses to replace an existing file unless overwrite is true, which needs the user's say-so. Returns the path, the sheets written and warnings naming what Excel will not get (charts, validation and conditional-formatting rules, locks).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Absolute path ending in .xlsx."
+              },
+              "overwrite": {
+                "type": "boolean",
+                "description": "Replace an existing file at path. Only when the user asked for it."
               }
             },
             "required": [

@@ -18,6 +18,7 @@ import {
 } from '@purescience/platform-ui/components/common/documents'
 import {
   chooseSaveFilePath,
+  fileExists,
   openImportFile,
   readBinaryFile,
   readClipboard,
@@ -217,6 +218,7 @@ export function PureSheetsShell({
   const [matchCase, setMatchCase] = useState(false)
   const [commentBarOpen, setCommentBarOpen] = useState(false)
   const [importWarnings, setImportWarnings] = useState<string[] | null>(null)
+  const [warningsTitle, setWarningsTitle] = useState('Imported with limitations')
   const importWarningsRef = useRef<string[]>([])
   const [renamingSheetId, setRenamingSheetId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
@@ -245,6 +247,12 @@ export function PureSheetsShell({
       openWorkbook: async path => {
         if (!await openWorkbookPath(path)) throw Error('A newer workbook request superseded this open. Try again.')
         return { title: documentRef.current.metadata.title, sourcePath: path, filePath: boundPathRef.current ?? null, warnings: importWarningsRef.current }
+      },
+      saveAsXlsx: async (path, overwrite) => {
+        if (!/\.xlsx$/i.test(path)) throw Error('The Excel path must end in .xlsx.')
+        if (!overwrite && (await fileExists(path)))
+          throw Error(`${fileNameFromPath(path)} already exists. Choose another path, or pass overwrite: true if the user asked to replace it.`)
+        return exportXlsxToPath(path)
       },
       createWorkbook: async title => {
         const fresh = createBlankWorkbook(title)
@@ -1993,6 +2001,7 @@ export function PureSheetsShell({
         installNewWorkbook(imported.document)
         setSaveState('dirty')
         importWarningsRef.current = imported.warnings
+        setWarningsTitle('Imported with limitations')
         setImportWarnings(imported.warnings)
         setStatusMessage(`Imported ${fileNameFromPath(path)}`)
       },
@@ -2035,25 +2044,42 @@ export function PureSheetsShell({
   }
 
   async function exportXlsxFile(): Promise<void> {
-    const version = transitions.version
     const path = await chooseSaveFilePath({
       defaultName: `${document.metadata.title || 'Workbook'}.xlsx`,
       filters: [{ name: 'Excel workbook', extensions: ['xlsx'] }],
     })
     if (!path) return
+    await exportXlsxToPath(path)
+  }
+
+  /**
+   * Save as Excel: the menu and the agent's saveWorkbookAsXlsx both land here. The workbook stays bound to its own
+   * file; the .xlsx is a copy, and what Excel will not get is listed in the notice and returned.
+   */
+  async function exportXlsxToPath(path: string): Promise<{ path: string; sheets: string[]; warnings: string[] }> {
+    const version = transitions.version
     await captureEditorWorkbook()
     if (version !== transitions.version)
-      throw Error('The workbook changed before export. Export it again.')
+      throw Error('The workbook changed before saving as Excel. Save it again.')
     const docToExport = documentRef.current
-    const bytes = await exportXlsxWorkbook(docToExport)
+    const { bytes, warnings } = await exportXlsxWorkbook(docToExport)
     await writeBinaryFile(path, bytesToBase64(bytes))
-    setStatusMessage(`Exported workbook to ${fileNameFromPath(path)}`)
+    setStatusMessage(`Saved a copy as ${fileNameFromPath(path)}`)
+    if (warnings.length) {
+      setWarningsTitle('Saved as Excel with limitations')
+      setImportWarnings(warnings)
+    }
     recordLedgerOperation({
       lane: 'user',
       kind: 'sheets.export.xlsx',
-      summary: `Exported workbook "${docToExport.metadata.title}" as XLSX`,
+      summary: `Saved workbook "${docToExport.metadata.title}" as Excel`,
       refs: { path },
     })
+    return {
+      path,
+      sheets: docToExport.workbook.sheets.filter(sheet => !sheet.agentDraft).map(sheet => sheet.name),
+      warnings,
+    }
   }
 
   function resizeSelectedColumn(width: number): void {
@@ -2728,7 +2754,7 @@ export function PureSheetsShell({
 
         {importWarnings && importWarnings.length > 0 && (
           <ImportWarningsBanner aria-label="Import warnings">
-            <ImportWarningsTitle>Imported with limitations</ImportWarningsTitle>
+            <ImportWarningsTitle>{warningsTitle}</ImportWarningsTitle>
             <ImportWarningsList>
               {importWarnings.map(warning => (
                 <li key={warning}>{warning}</li>

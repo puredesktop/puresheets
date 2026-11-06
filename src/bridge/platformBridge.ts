@@ -130,6 +130,15 @@ export async function readBinaryFile(
   }
 }
 
+/** Whether a file is there to read: a one-byte read, since the bridge has no stat. */
+export async function fileExists(path: string): Promise<boolean> {
+  try {
+    return (await readBinaryFile(path, 1)).byteLength > 0
+  } catch {
+    return false
+  }
+}
+
 export async function writeTextFile(path: string, content: string): Promise<void> {
   if (isStandaloneDevMode()) {
     window.localStorage.setItem(`purescience:sheets:file:${path}`, content)

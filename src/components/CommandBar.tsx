@@ -163,8 +163,8 @@ const IMPORT_EXPORT_OPTIONS: Array<{
 }> = [
   { value: 'import-csv', label: 'Import CSV as new sheet…' },
   { value: 'export-csv', label: 'Export sheet as CSV…' },
-  { value: 'import-xlsx', label: 'Import XLSX workbook…' },
-  { value: 'export-xlsx', label: 'Export workbook as XLSX…' },
+  { value: 'import-xlsx', label: 'Open Excel workbook (.xlsx)…' },
+  { value: 'export-xlsx', label: 'Save as Excel (.xlsx)…' },
 ]
 
 /**

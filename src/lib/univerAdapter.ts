@@ -30,6 +30,7 @@ import {
   normalizeProtection,
   normalizeValidations,
 } from './sheetMetadataNormalize'
+import { patternOfStyle, styleFromPattern } from './numberFormats'
 import type {
   CellStyle,
   PureSheetsDocument,
@@ -209,7 +210,12 @@ function createUniverSheetSnapshot(
     scrollLeft: 0,
     defaultColumnWidth: DEFAULT_COLUMN_WIDTH,
     defaultRowHeight: DEFAULT_ROW_HEIGHT,
-    mergeData: [],
+    mergeData: (sheet.merges ?? []).flatMap(merge => {
+      const [start, end] = merge.split(':').map(parseCellKey)
+      return start && end
+        ? [{ startRow: start.row, startColumn: start.column, endRow: end.row, endColumn: end.column }]
+        : []
+    }),
     cellData: collectCellData(sheet),
     rowData: Object.fromEntries(
       Object.entries(sheet.rowHeights ?? {}).map(([row, height]) => [
@@ -269,7 +275,7 @@ function workbookSheetFromUniverSheet(
       positiveInteger(sheet.columnCount) ??
       fallback?.columnCount ??
       DEFAULT_COLUMN_COUNT,
-    cells: cellsFromUniverSheet(sheet.cellData, styles),
+    cells: cellsFromUniverSheet(sheet.cellData, styles, fallback?.cells),
     columnWidths:
       dimensionsFromUniverData(sheet.columnData, 'w') ?? fallback?.columnWidths,
     rowHeights:
@@ -282,6 +288,9 @@ function workbookSheetFromUniverSheet(
       typeof sheet.freeze?.xSplit === 'number'
         ? sheet.freeze.xSplit
         : fallback?.frozenColumns,
+    merges: Array.isArray(sheet.mergeData)
+      ? mergesFromUniverData(sheet.mergeData)
+      : fallback?.merges,
     filterRow: optionalNumber(custom.filterRow) ?? fallback?.filterRow,
     filterColumn: optionalNumber(custom.filterColumn) ?? fallback?.filterColumn,
     filterHasHeader:
@@ -315,9 +324,21 @@ function workbookSheetFromUniverSheet(
   }
 }
 
+function mergesFromUniverData(
+  mergeData: NonNullable<IWorksheetData['mergeData']>,
+): string[] | undefined {
+  const merges = mergeData.flatMap(range => {
+    const start = toCellKey(range.startRow, range.startColumn)
+    const end = toCellKey(range.endRow, range.endColumn)
+    return start && end && start !== end ? [`${start}:${end}`] : []
+  })
+  return merges.length ? merges : undefined
+}
+
 function cellsFromUniverSheet(
   cellData: IWorksheetData['cellData'] | undefined,
   styles: IWorkbookData['styles'] | undefined,
+  fallbackCells?: Record<string, SheetCell>,
 ): Record<string, SheetCell> {
   const cells: Record<string, SheetCell> = {}
   for (const [rowIndex, row] of Object.entries(cellData ?? {})) {
@@ -328,10 +349,11 @@ function cellsFromUniverSheet(
       if (!key || !cell) continue
       const value = univerCellValue(cell)
       if (!value && !cell.f && !cell.s) continue
-      const style =
-        typeof cell.s === 'string'
-          ? fromUniverStyle(styles?.[cell.s] ?? undefined)
-          : undefined
+      const univerStyle = typeof cell.s === 'string' ? styles?.[cell.s] ?? undefined : undefined
+      let style = fromUniverStyle(univerStyle)
+      // Every styled cell renders middle, so a chosen middle (an Excel import's) is kept from the model.
+      if (univerStyle?.vt === VerticalAlign.MIDDLE && fallbackCells?.[key]?.style?.verticalAlign === 'middle')
+        style = { ...style, verticalAlign: 'middle' }
       const custom = cell.custom as { puresheetsKind?: unknown; puresheetsNumberText?: unknown } | undefined
       const preservedNumber = custom?.puresheetsKind === 'number' && (
         custom.puresheetsNumberText === value ||
@@ -378,55 +400,22 @@ function fromUniverStyle(style: IStyleData | undefined): CellStyle | undefined {
   if (typeof style.fs === 'number') cellStyle.fontSize = style.fs
   if (typeof style.cl?.rgb === 'string') cellStyle.textColor = style.cl.rgb
   if (typeof style.bg?.rgb === 'string') cellStyle.fillColor = style.bg.rgb
-  if (
-    style.bd &&
-    Object.values(style.bd).some(border => border?.s === BorderStyleTypes.THIN)
-  ) {
-    cellStyle.border = true
-  }
+  const sides = BORDER_SIDES.filter(
+    ([key]) => style.bd?.[key] && style.bd[key]?.s !== BorderStyleTypes.NONE,
+  ).map(([, side]) => side)
+  if (sides.length === 4) cellStyle.border = true
+  else if (sides.length) cellStyle.borderSides = sides
   if (style.ht === HorizontalAlign.CENTER) cellStyle.align = 'center'
   if (style.ht === HorizontalAlign.RIGHT) cellStyle.align = 'right'
   if (style.ht === HorizontalAlign.LEFT) cellStyle.align = 'left'
+  if (style.vt === VerticalAlign.TOP) cellStyle.verticalAlign = 'top'
+  if (style.vt === VerticalAlign.BOTTOM) cellStyle.verticalAlign = 'bottom'
   const pattern = style.n?.pattern
   if (typeof pattern === 'string') {
-    cellStyle.numberFormat = numberFormatFromPattern(pattern)
-    const decimals = decimalsFromPattern(pattern, cellStyle.numberFormat)
-    if (decimals !== undefined) cellStyle.decimals = decimals
+    // A code PureSheets cannot name ('General') still keeps its family 'number', as before.
+    Object.assign(cellStyle, styleFromPattern(pattern) ?? { numberFormat: 'number' })
   }
   return Object.keys(cellStyle).length ? cellStyle : undefined
-}
-
-function numberFormatFromPattern(
-  pattern: string,
-): NonNullable<CellStyle['numberFormat']> {
-  if (pattern.includes('$')) return 'currency'
-  if (pattern.includes('%')) return 'percent'
-  if (/y|m|d/i.test(pattern)) return 'date'
-  if (pattern === '@') return 'text'
-  return 'number'
-}
-
-/**
- * Recover the explicit decimal count from a number pattern. Patterns that
- * match a format's default (currency/percent: two places; plain number:
- * optional `.########` digits) normalize to "unset" so styles round-trip
- * stably — the display is identical either way.
- */
-function decimalsFromPattern(
-  pattern: string,
-  format: NonNullable<CellStyle['numberFormat']>,
-): number | undefined {
-  if (format === 'date' || format === 'text') return undefined
-  if (/\.#/.test(pattern)) return undefined // optional digits: as entered
-  const zeros = /\.(0+)/.exec(pattern)?.[1]?.length ?? 0
-  if (format === 'number') {
-    if (zeros > 0) return zeros
-    // Only a strict integer digit pattern (e.g. '#,##0') means "0 decimals";
-    // anything else ('General', free-form patterns) stays as-entered.
-    return /^[#,0]+$/.test(pattern) ? 0 : undefined
-  }
-  // currency / percent default to two places
-  return zeros === 2 ? undefined : zeros
 }
 
 function dimensionsFromUniverData(
@@ -515,18 +504,31 @@ function toUniverStyle(style: CellStyle | undefined): IStyleData {
   if (style.fontSize) data.fs = style.fontSize
   if (style.textColor) data.cl = { rgb: style.textColor }
   if (style.fillColor) data.bg = { rgb: style.fillColor }
-  if (style.border) {
+  const sides = style.border
+    ? BORDER_SIDES
+    : BORDER_SIDES.filter(([, side]) => style.borderSides?.includes(side))
+  if (sides.length) {
     const border = { s: BorderStyleTypes.THIN, cl: { rgb: CELL_BORDER_COLOR } }
-    data.bd = { t: border, r: border, b: border, l: border }
+    data.bd = Object.fromEntries(sides.map(([key]) => [key, border]))
   }
   if (style.align) data.ht = horizontalAlign(style.align)
-  if (style.numberFormat)
-    data.n = {
-      pattern: numberFormatPattern(style.numberFormat, style.decimals),
-    }
-  data.vt = VerticalAlign.MIDDLE
+  const pattern = patternOfStyle(style)
+  if (pattern) data.n = { pattern }
+  data.vt =
+    style.verticalAlign === 'top'
+      ? VerticalAlign.TOP
+      : style.verticalAlign === 'bottom'
+      ? VerticalAlign.BOTTOM
+      : VerticalAlign.MIDDLE
   return data
 }
+
+const BORDER_SIDES: Array<['t' | 'r' | 'b' | 'l', NonNullable<CellStyle['borderSides']>[number]]> = [
+  ['t', 'top'],
+  ['r', 'right'],
+  ['b', 'bottom'],
+  ['l', 'left'],
+]
 
 function horizontalAlign(
   align: NonNullable<CellStyle['align']>,
@@ -534,24 +536,6 @@ function horizontalAlign(
   if (align === 'center') return HorizontalAlign.CENTER
   if (align === 'right') return HorizontalAlign.RIGHT
   return HorizontalAlign.LEFT
-}
-
-function numberFormatPattern(
-  format: NonNullable<CellStyle['numberFormat']>,
-  decimals?: number,
-): string {
-  const zeros =
-    decimals !== undefined && decimals > 0
-      ? `.${'0'.repeat(Math.min(decimals, 8))}`
-      : ''
-  if (format === 'currency')
-    return decimals === undefined ? '$#,##0.00' : `$#,##0${zeros}`
-  if (format === 'percent')
-    return decimals === undefined ? '0.00%' : `0${zeros}%`
-  if (format === 'date') return 'yyyy-mm-dd'
-  if (format === 'number')
-    return decimals === undefined ? '#,##0.########' : `#,##0${zeros}`
-  return '@'
 }
 
 function parseCellKey(key: string): { row: number; column: number } | null {
