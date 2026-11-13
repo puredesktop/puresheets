@@ -49,6 +49,7 @@
       "tools": [
         {
           "name": "openWorkbook",
+          "risk": "read",
           "description": "Open an existing .sheets/.sheets.html workbook, or import an Excel .xlsx or a .csv/.tsv from an exact path. Use before auditing a spreadsheet supplied by the user; do not audit a blank restored workbook instead. Flushes current edits before switching. Excel and CSV imports create a separate native workbook and leave the original file as it is. An .xlsx keeps every sheet and its name, values and formulas (cross-sheet ones too), number formats, merged cells, column widths and row heights, bold/italic/fill/font colour/borders/alignment and frozen panes; returns the title, source path and warnings naming anything that did not come over. Read getSheetsContext and readRange next. Call completeWorkbook after any changes to save a separate deliverable.",
           "inputSchema": {
             "type": "object",
