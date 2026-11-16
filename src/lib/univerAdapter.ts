@@ -1,3 +1,5 @@
+import { normalizeNamedRanges, parseQualifiedRange, qualifiedRange } from './rangeNames'
+import { normalizePivot } from './workbookAnalysis'
 import {
   BorderStyleTypes,
   BooleanNumber,
@@ -37,6 +39,8 @@ import type {
   SheetCell,
   WorkbookSheet,
 } from '../types'
+
+export const DEFINED_NAMES_RESOURCE = 'SHEET_DEFINED_NAME_PLUGIN'
 
 const UNIVER_APP_VERSION = '0.25.0'
 const DEFAULT_COLUMN_WIDTH = 96
@@ -78,9 +82,22 @@ export function createUniverSnapshot(
     styles: collectStyles(document),
     sheetOrder: document.workbook.sheets.map(sheet => sheet.id),
     sheets,
+    resources: [{
+      name: DEFINED_NAMES_RESOURCE,
+      data: JSON.stringify(Object.fromEntries((document.workbook.namedRanges ?? []).flatMap((entry, id) => {
+        const sheet = document.workbook.sheets.find(sheet => sheet.id === entry.sheetId)
+        return sheet ? [[String(id), {
+          id: String(id),
+          name: entry.name,
+          formulaOrRefString: qualifiedRange(sheet.name, entry.range),
+          localSheetId: 'AllDefaultWorkbook',
+        }]] : []
+      }))),
+    }],
     custom: {
       puresheets: {
         activeSheetId: document.workbook.activeSheetId,
+        namedRanges: document.workbook.namedRanges ?? [],
         updatedAt: document.metadata.updatedAt,
       },
     },
@@ -139,6 +156,24 @@ export function documentFromUniverSnapshot(
     sheets.some(sheet => sheet.id === custom.activeSheetId)
       ? custom.activeSheetId
       : sheets[0].id
+  let namedRanges = normalizeNamedRanges(custom.namedRanges ?? fallback?.workbook.namedRanges, sheets)
+  const resource = snapshot.resources?.find(entry => entry.name === DEFINED_NAMES_RESOURCE)
+  if (resource?.data) {
+    try {
+      const entries: unknown = JSON.parse(resource.data)
+      if (isRecord(entries)) {
+        namedRanges = normalizeNamedRanges(Object.values(entries).flatMap(entry => {
+          if (!isRecord(entry) || typeof entry.formulaOrRefString !== 'string' ||
+            (entry.localSheetId && entry.localSheetId !== 'AllDefaultWorkbook')) return []
+          const ref = parseQualifiedRange(entry.formulaOrRefString)
+          const sheet = ref && sheets.find(sheet => sheet.name.toLowerCase() === ref.sheet.toLowerCase())
+          return ref && sheet ? [{ name: entry.name, sheetId: sheet.id, range: ref.range }] : []
+        }), sheets)
+      }
+    } catch {
+      // Keep the document's definitions if the editor did not provide a usable name resource.
+    }
+  }
   const now = new Date().toISOString()
 
   return withFreshUniverSnapshot({
@@ -163,6 +198,7 @@ export function documentFromUniverSnapshot(
       activeSheetId,
       sheets,
       agentLog: fallback?.workbook.agentLog,
+      namedRanges,
     },
   })
 }
@@ -246,6 +282,7 @@ function createUniverSheetSnapshot(
         validations: sheet.validations ?? null,
         protection: sheet.protection ?? null,
         conditionalFormats: sheet.conditionalFormats ?? null,
+        pivot: sheet.pivot ?? null,
       },
     },
   }
@@ -315,6 +352,7 @@ function workbookSheetFromUniverSheet(
       'protection' in custom
         ? normalizeProtection(custom.protection)
         : fallback?.protection,
+    pivot: 'pivot' in custom ? normalizePivot(custom.pivot) : fallback?.pivot,
     conditionalFormats:
       'conditionalFormats' in custom
         ? normalizeConditionalFormats(custom.conditionalFormats)

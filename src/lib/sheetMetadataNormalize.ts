@@ -61,6 +61,7 @@ export function normalizeValidations(
     if (typeof item.max === 'number' && Number.isFinite(item.max)) {
       rule.max = item.max
     }
+    if (item.whole === true) rule.whole = true
     return [rule]
   })
   return rules.length ? rules : undefined

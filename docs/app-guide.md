@@ -11,6 +11,16 @@ A spreadsheet editor built on Univer, with cells, formulas, formatting, workshee
 | **Spreadsheet surface** | Select cells, enter data, and work across rows and columns. |
 | **Sheet tabs and supporting panels** | Switch worksheets and work with comments, charts, data rules, and agent activity. |
 
+## Analyze a workbook
+
+- **Clean up data** previews a split or removes duplicates by the columns you choose. Apply writes a new sheet with the cleaned values.
+- **Pivot table** groups a headed range by one row field and an optional column field. Choose sum, count or average. Open Analyze on the pivot sheet to adjust its fields or refresh its results.
+- **Trace formulas** shows the cells the current formula reads and the formulas that use the selected cell. Open a reference or trace another formula directly from the results.
+- **Named ranges** assigns a workbook-wide name to a selection. Use the name in formulas such as `=SUM(Revenue)`.
+- **Goal Seek** finds a value for one numeric input cell to reach a target in a formula. Review the result before applying it.
+
+Excel import and export carry supported single-series charts, validation and conditional-formatting rules, and workbook-wide names for contiguous ranges. Simple Excel pivots with one row field, an optional column field and one value field can be edited in PureSheets. Excel export writes the pivot result as cells. Keep the native workbook to retain the pivot settings.
+
 ## Working with puresheets
 
 1. Create or open a workbook and enter your own data.

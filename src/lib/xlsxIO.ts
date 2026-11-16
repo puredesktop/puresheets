@@ -1,11 +1,15 @@
 import ExcelJS from 'exceljs'
 import JSZip from 'jszip'
+import { addChartsToXlsx, child, importRangeNames, readWorkbookParts, readWorksheetObjects, worksheetValidations } from './xlsxParts'
+import { qualifiedRange } from './rangeNames'
+import { importValidation, exportValidation, importConditional, exportConditional } from './xlsxRules'
 import {
   cellKey,
   columnLabel,
   computedCellValue,
   createBlankSheet,
   createBlankWorkbook,
+  normalizeRangeToken,
   parseCellKey,
 } from './workbookModel'
 import { withFreshUniverSnapshot } from './univerAdapter'
@@ -13,6 +17,8 @@ import { patternOfStyle, styleFromPattern } from './numberFormats'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
 import type {
   CellStyle,
+  ConditionalFormatRule,
+  ValidationRule,
   PureSheetsDocument,
   SheetCell,
   WorkbookSheet,
@@ -49,6 +55,7 @@ export async function importXlsxWorkbook(
 ): Promise<XlsxImportResult> {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
   const workbook = await loadWorkbook(bytes)
+  const parts = await readWorkbookParts(bytes)
   const palette = themePalette(
     (workbook as unknown as { _themes?: Record<string, string> })._themes?.theme1,
   )
@@ -56,7 +63,7 @@ export async function importXlsxWorkbook(
   const sheets: WorkbookSheet[] = []
   let importedCells = 0
 
-  workbook.eachSheet(worksheet => {
+  for (const worksheet of workbook.worksheets) {
     const name = worksheet.name || `Sheet ${sheets.length + 1}`
     const sheetLosses = new LossCounter()
     const cells: Record<string, SheetCell> = {}
@@ -122,17 +129,25 @@ export async function importXlsxWorkbook(
     if (hiddenColumns) sheetLosses.add('hidden columns (shown)', hiddenColumns)
     const images = worksheet.getImages().length
     if (images) sheetLosses.add('pictures', images)
-    const validations = Object.keys(
-      (worksheet as unknown as { dataValidations?: { model?: Record<string, unknown> } })
-        .dataValidations?.model ?? {},
-    ).length
-    if (validations)
-      sheetLosses.add('data-validation rules (add them again with Data validation)', validations)
-    const conditional = (
-      worksheet as unknown as { conditionalFormattings?: unknown[] }
-    ).conditionalFormattings?.length ?? 0
-    if (conditional)
-      sheetLosses.add('conditional-formatting rules (add them again with Conditional format)', conditional)
+    const validations: ValidationRule[] = []
+    const conditionalFormats: ConditionalFormatRule[] = []
+    for (const rule of await worksheetValidations(parts, name)) {
+      const ranges = (rule.attrs.sqref ?? '').split(/\s+/).map(normalizeRangeToken).filter((item): item is string => !!item)
+      const condition = importValidation(rule.attrs.type, rule.attrs.operator, child(rule, 'formula1')?.text, child(rule, 'formula2')?.text)
+      if (condition && ranges.length) {
+        for (const range of ranges) validations.push({ ...condition, range, id: 'excel-validation-' + validations.length })
+      } else sheetLosses.add('unsupported data-validation rules')
+    }
+    const formats = (worksheet as unknown as { conditionalFormattings?: ExcelJS.ConditionalFormattingOptions[] }).conditionalFormattings ?? []
+    for (const group of formats) {
+      const ranges = group.ref.split(/\s+/).map(normalizeRangeToken).filter((item): item is string => !!item)
+      for (const rule of group.rules) {
+        const mapped = importConditional(rule, color => resolveColor(color, palette))
+        if (mapped && ranges.length) {
+          for (const range of ranges) conditionalFormats.push({ ...mapped, range, id: 'excel-format-' + conditionalFormats.length })
+        } else sheetLosses.add('unsupported conditional-formatting rules')
+      }
+    }
     const tables = Object.keys(
       (worksheet as unknown as { tables?: Record<string, unknown> }).tables ?? {},
     ).length
@@ -154,15 +169,16 @@ export async function importXlsxWorkbook(
       frozenColumns: frozen.columns || undefined,
       merges: merges.length ? merges : undefined,
       comments: Object.keys(comments).length ? comments : undefined,
+      validations: validations.length ? validations : undefined,
+      conditionalFormats: conditionalFormats.length ? conditionalFormats : undefined,
     })
-  })
+  }
 
-  const names = (workbook.definedNames.model ?? []).filter(
-    (entry: { name?: string }) => entry.name && !entry.name.startsWith('_xlnm.'),
-  ).length
-  if (names)
-    losses.add('named ranges (formulas that use a name will show #NAME?)', names)
-  for (const part of unsupportedParts(listZipEntries(bytes))) losses.add(part)
+  const { names, skipped } = importRangeNames(parts.workbook, sheets)
+  if (skipped) losses.add('unsupported named ranges', skipped)
+  const entries = listZipEntries(bytes)
+  const objects = await readWorksheetObjects(parts, sheets)
+  for (const item of unsupportedParts(entries, objects)) losses.add(item)
 
   const warnings = losses.lines()
   if (!sheets.length) return { document: createBlankWorkbook(title), warnings }
@@ -172,7 +188,7 @@ export async function importXlsxWorkbook(
     version: 1,
     engine: { name: 'univer' },
     metadata: { title, createdAt: now, updatedAt: now },
-    workbook: { activeSheetId: sheets[0].id, sheets },
+    workbook: { activeSheetId: sheets[0].id, sheets, namedRanges: names.length ? names : undefined },
   })
   return { document, warnings }
 }
@@ -180,7 +196,7 @@ export async function importXlsxWorkbook(
 async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
   const workbook = new ExcelJS.Workbook()
   try {
-    await workbook.xlsx.load(bytes.slice().buffer as ArrayBuffer)
+    await workbook.xlsx.load(bytes.slice().buffer as ArrayBuffer, { ignoreNodes: ['dataValidations'] })
     return workbook
   } catch (firstError) {
     // Files written by .NET tools prefix every element (<x:workbook>) and point at parts by absolute path,
@@ -189,7 +205,7 @@ async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
     if (unprefixed) {
       const retry = new ExcelJS.Workbook()
       try {
-        await retry.xlsx.load(unprefixed)
+        await retry.xlsx.load(unprefixed, { ignoreNodes: ['dataValidations'] })
         return retry
       } catch {
         // fall through to the plain message
@@ -675,20 +691,21 @@ export function listZipEntries(bytes: Uint8Array): string[] {
   return names
 }
 
-export function unsupportedParts(entries: string[]): string[] {
+export function unsupportedParts(entries: string[], imported = { chartCount: 0, pivotCount: 0 }): string[] {
   const count = (pattern: RegExp) => entries.filter(entry => pattern.test(entry)).length
   const parts: string[] = []
-  const charts = count(/^xl\/charts\/chart\d+\.xml$/)
-  if (charts) parts.push(`${charts} chart${charts === 1 ? '' : 's'} (left out; make them again with Chart)`)
-  const pivots = count(/^xl\/pivotTables\/pivotTable\d+\.xml$/)
-  if (pivots)
+  const chartParts = count(/^xl\/charts\/chart\d+\.xml$/)
+  const charts = chartParts - imported.chartCount
+  if (charts > 0) parts.push(`${charts} chart${charts === 1 ? '' : 's'} (left out; make them again with Chart)`)
+  const pivots = count(/^xl\/pivotTables\/pivotTable\d+\.xml$/) - imported.pivotCount
+  if (pivots > 0)
     parts.push(`${pivots} pivot table${pivots === 1 ? ' (its' : 's (their'} last values came in as plain cells)`)
   if (count(/^xl\/vbaProject\.bin$/)) parts.push('macros (left out)')
   const slicers = count(/^xl\/(slicers|timelines)\//)
   if (slicers) parts.push('slicers and timelines (left out)')
   const links = count(/^xl\/externalLinks\/externalLink\d+\.xml$/)
   if (links) parts.push(`links to ${links} other workbook${links === 1 ? '' : 's'} (formulas that use them will show #REF!)`)
-  if (count(/^xl\/drawings\/drawing\d+\.xml$/) && !charts)
+  if (count(/^xl\/drawings\/drawing\d+\.xml$/) && !chartParts)
     parts.push('drawn shapes and text boxes (left out)')
   return parts
 }
@@ -744,16 +761,33 @@ export async function exportXlsxWorkbook(
         { state: 'frozen', ySplit: sheet.frozenRows ?? 0, xSplit: sheet.frozenColumns ?? 0 },
       ]
     }
-    if (sheet.charts?.length) sheetLosses.add('charts (Excel will not get them)', sheet.charts.length)
-    if (sheet.validations?.length) sheetLosses.add('data-validation rules', sheet.validations.length)
-    if (sheet.conditionalFormats?.length)
-      sheetLosses.add('conditional-formatting rules', sheet.conditionalFormats.length)
+    for (const validation of sheet.validations ?? []) {
+      const rule = exportValidation(validation)
+      const range = normalizeRangeToken(validation.range)
+      if (rule && range) {
+        const rules = (worksheet as unknown as { dataValidations: { add: (ref: string, rule: ExcelJS.DataValidation) => void } }).dataValidations
+        rules.add(range, rule)
+      } else sheetLosses.add('unsupported data-validation rules')
+    }
+    for (const [priority, format] of (sheet.conditionalFormats ?? []).entries()) {
+      const range = normalizeRangeToken(format.range)
+      const rule = range && exportConditional(format, range, priority + 1)
+      if (range && rule) worksheet.addConditionalFormatting({ ref: range, rules: [rule] })
+      else sheetLosses.add('unsupported conditional-formatting rules')
+    }
+    if (sheet.pivot) sheetLosses.add('pivot output is exported as cells. Keep the PureSheets workbook to edit the pivot')
     if (sheet.protection?.lockedRanges.length) sheetLosses.add('locked ranges (cells export unlocked)')
     if (sheet.filterRow !== undefined) sheetLosses.add('the filter')
     losses.addSection(sheet.name, sheetLosses)
   }
+  for (const entry of document.workbook.namedRanges ?? []) {
+    const sheet = exported.find(sheet => sheet.id === entry.sheetId)
+    if (sheet) workbook.definedNames.add(qualifiedRange(names.get(sheet.name) ?? sheet.name, entry.range), entry.name)
+    else losses.add('named range ' + entry.name + ' (its sheet is not exported)')
+  }
   const buffer = await workbook.xlsx.writeBuffer()
-  return { bytes: new Uint8Array(buffer as ArrayBuffer), warnings: losses.lines() }
+  const bytes = await addChartsToXlsx(new Uint8Array(buffer as ArrayBuffer), exported.map(sheet => ({ sheet, name: names.get(sheet.name) ?? sheet.name })), document.workbook)
+  return { bytes, warnings: losses.lines() }
 }
 
 /**

@@ -71,6 +71,7 @@ export interface ValidationRule {
   /** Inclusive bounds for `number-range` rules. */
   min?: number
   max?: number
+  whole?: boolean
 }
 
 /** One conditional-formatting rule over a range (Phase S3). */
@@ -95,6 +96,24 @@ export interface SheetProtection {
   lockedRanges: string[]
 }
 
+export interface NamedRange {
+  name: string
+  sheetId: string
+  range: string
+}
+
+export interface PivotDefinition {
+  sourceSheetId: string
+  range: string
+  row: number
+  column: number | null
+  value: number
+  summary: 'sum' | 'count' | 'average'
+  output: string
+  rows: number
+  columns: number
+}
+
 export interface WorkbookSheet {
   id: string
   name: string
@@ -115,6 +134,7 @@ export interface WorkbookSheet {
   /** Optional contains-filter applied to the filter column (Phase S3). */
   filterQuery?: string
   charts?: WorkbookChart[]
+  pivot?: PivotDefinition
   /** Cell comments/notes, keyed by cell (Phase S3). */
   comments?: Record<string, string>
   validations?: ValidationRule[]
@@ -167,6 +187,7 @@ export interface PureSheetsDocument {
   workbook: {
     activeSheetId: string
     sheets: WorkbookSheet[]
+    namedRanges?: NamedRange[]
     /**
      * The agent log: every agent write (cell changes, charts, sheets,
      * comments) recorded with before/after, newest first. The log — not a

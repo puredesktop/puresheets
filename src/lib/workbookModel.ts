@@ -1,3 +1,4 @@
+import { expandRangeNames } from './rangeNames'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
 import type {
   AgentCellChange,
@@ -92,6 +93,7 @@ export function duplicateSheet(
     // A duplicate is an ordinary sheet — it must not claim to be an agent
     // draft of the original's source (QA operations only track the original).
     agentDraft: undefined,
+    pivot: undefined,
     cells: Object.fromEntries(
       Object.entries(source.cells).map(([key, cell]) => [
         key,
@@ -179,6 +181,14 @@ export function normalizeRangeToken(rangeToken: string): string | null {
         range.end.column,
       )}`
     : null
+}
+
+export function rangesIntersect(first: string, second: string): boolean {
+  const bounds = (range: string) => parseRange(normalizeRangeToken(range) ?? '')
+  const a = bounds(first)
+  const b = bounds(second)
+  return !!a && !!b && a.start.row <= b.end.row && b.start.row <= a.end.row &&
+    a.start.column <= b.end.column && b.start.column <= a.end.column
 }
 
 export function cellsInRange(rangeToken: string, maxCells = Infinity): string[] {
@@ -1532,6 +1542,7 @@ function formulaResultsFor(sheet: WorkbookSheet): Map<string, string> {
 
 /** The sheets a formula may name (Sheet2!A1). */
 export interface FormulaWorkbook {
+  namedRanges?: PureSheetsDocument['workbook']['namedRanges']
   sheets: readonly WorkbookSheet[]
 }
 /** The workbook of the evaluation under way: set by the public entry points, kept by everything they call. */
@@ -1581,7 +1592,8 @@ function evaluateFormulaHere(sheet: WorkbookSheet, formula: string): string {
   }
   formulaEvaluationDepth += 1
   try {
-    const expression = formula.trim().replace(/^=/, '')
+    const expanded = formulaWorkbook?.namedRanges ? expandRangeNames(formula, formulaWorkbook.namedRanges, formulaWorkbook.sheets) : formula
+    const expression = expanded.trim().replace(/^=/, '')
     if (!expression) return '#FORMULA'
     const result = evaluateExpressionString(sheet, expression)
     return result ?? '#FORMULA'

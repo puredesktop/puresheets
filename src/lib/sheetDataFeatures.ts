@@ -1,8 +1,7 @@
 import {
-  cellsInRange,
   computedCellValue,
   normalizeRangeToken,
-  parseCellKey,
+  rangesIntersect,
   type FormulaWorkbook,
 } from './workbookModel'
 import type {
@@ -56,10 +55,9 @@ export function clearValidationInRange(
   sheet: WorkbookSheet,
   rangeToken: string,
 ): WorkbookSheet {
-  const cells = new Set(cellsInRange(rangeToken))
-  if (!cells.size) return sheet
+  if (!normalizeRangeToken(rangeToken)) return sheet
   const remaining = (sheet.validations ?? []).filter(
-    rule => !cellsInRange(rule.range).some(key => cells.has(key)),
+    rule => !rangesIntersect(rule.range, rangeToken),
   )
   if (remaining.length === (sheet.validations ?? []).length) return sheet
   return {
@@ -73,11 +71,7 @@ export function validationRuleForCell(
   key: string,
 ): ValidationRule | undefined {
   if (!sheet.validations?.length) return undefined
-  const position = parseCellKey(key)
-  if (!position) return undefined
-  return sheet.validations.find(rule =>
-    cellsInRange(rule.range).includes(key),
-  )
+  return sheet.validations.find(rule => rangesIntersect(rule.range, key))
 }
 
 export interface ValidationResult {
@@ -103,6 +97,7 @@ export function validateValue(
     }
   }
   if (rule.kind === 'number-range') {
+    if (rule.whole && !Number.isInteger(Number(value))) return { valid: false, message: 'Enter a whole number.' }
     const numeric = Number(trimmed)
     if (!Number.isFinite(numeric)) {
       return { valid: false, message: 'Value must be a number' }
@@ -129,14 +124,16 @@ export function invalidCellsForSheet(
   workbook?: FormulaWorkbook,
 ): Map<string, string> {
   const flagged = new Map<string, string>()
-  for (const rule of sheet.validations ?? []) {
-    for (const key of cellsInRange(rule.range)) {
-      if (flagged.has(key)) continue
-      const value = computedCellValue(sheet, key, workbook)
+  if (!sheet.validations?.length) return flagged
+  for (const key of Object.keys(sheet.cells)) {
+    const rules = sheet.validations.filter(rule => rangesIntersect(rule.range, key))
+    if (!rules.length) continue
+    const value = computedCellValue(sheet, key, workbook)
+    for (const rule of rules) {
       const result = validateValue(rule, value)
-      if (!result.valid) {
-        flagged.set(key, result.message ?? 'Invalid value')
-      }
+      if (result.valid) continue
+      flagged.set(key, result.message ?? 'Invalid value')
+      break
     }
   }
   return flagged
@@ -193,10 +190,9 @@ export function clearConditionalFormatsInRange(
   sheet: WorkbookSheet,
   rangeToken: string,
 ): WorkbookSheet {
-  const cells = new Set(cellsInRange(rangeToken))
-  if (!cells.size) return sheet
+  if (!normalizeRangeToken(rangeToken)) return sheet
   const remaining = (sheet.conditionalFormats ?? []).filter(
-    rule => !cellsInRange(rule.range).some(key => cells.has(key)),
+    rule => !rangesIntersect(rule.range, rangeToken),
   )
   if (remaining.length === (sheet.conditionalFormats ?? []).length) {
     return sheet
@@ -249,7 +245,7 @@ export function conditionalStyleForCell(
   if (!rules?.length) return undefined
   let merged: CellStyle | undefined
   for (const rule of rules) {
-    if (!cellsInRange(rule.range).includes(key)) continue
+    if (!rangesIntersect(rule.range, key)) continue
     const value = computedCellValue(sheet, key, workbook)
     if (!conditionMatches(rule.condition, value)) continue
     merged = { ...merged, ...rule.style }
