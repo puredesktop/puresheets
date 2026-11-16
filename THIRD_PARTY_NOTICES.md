@@ -20,4 +20,5 @@ Consult the installed version’s license and notices before redistributing depe
 | `lucide-react` | `^0.525.0` | [lucide-react](https://github.com/lucide-icons/lucide) |
 | `react` | `^19.1.0` | [react](https://github.com/react/react) |
 | `react-dom` | `^19.1.0` | [react-dom](https://github.com/react/react) |
+| `saxes` | `^5.0.1` | [saxes](https://github.com/lddubeau/saxes) (ISC) |
 | `styled-components` | `^6.1.18` | [styled-components](https://github.com/styled-components/styled-components) |

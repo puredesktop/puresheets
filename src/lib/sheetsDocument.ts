@@ -1,3 +1,5 @@
+import { normalizeNamedRanges } from './rangeNames'
+import { normalizePivot } from './workbookAnalysis'
 import { workbookLinkedTables } from './linkedTables'
 import type {
   AgentLogCellChange,
@@ -115,6 +117,7 @@ function validateDocument(input: unknown): PureSheetsDocument {
       activeSheetId,
       sheets,
       agentLog: normalizeAgentLog(workbook.agentLog),
+      namedRanges: normalizeNamedRanges(workbook.namedRanges, sheets),
     },
   }
   if (isRecord(engine.snapshot) && isRecord(engine.snapshot.sheets)) {
@@ -166,6 +169,7 @@ function normalizeSheet(input: unknown): WorkbookSheet {
         : undefined,
     filterQuery: normalizeFilterQuery(input.filterQuery),
     charts: normalizeCharts(input.charts),
+    pivot: normalizePivot(input.pivot),
     comments: normalizeComments(input.comments),
     validations: normalizeValidations(input.validations),
     protection: normalizeProtection(input.protection),

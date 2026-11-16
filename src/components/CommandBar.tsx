@@ -179,6 +179,7 @@ export function CommandBar({
   canRedo,
   findText,
   replaceText,
+  analysisActions,
   onUndo,
   onRedo,
   onCopySelectedRange,
@@ -238,6 +239,7 @@ export function CommandBar({
   canRedo: boolean
   findText: string
   replaceText: string
+  analysisActions?: React.ReactNode
   onUndo: () => void
   onRedo: () => void
   onCopySelectedRange: (cut?: boolean) => Promise<void>
@@ -368,6 +370,7 @@ export function CommandBar({
           ))}
         </Sections>
         <QuickActions>
+          {analysisActions}
           <ToolIconButton
             title="Undo"
             onClick={onUndo}
