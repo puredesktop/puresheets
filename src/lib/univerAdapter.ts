@@ -24,9 +24,15 @@ import {
 } from '../constants'
 
 import {
+  clampFontSize,
+  isForbiddenKey,
+  MAX_PERSISTED_ROWS,
+  MAX_SHEET_COLUMNS,
+  MAX_SHEET_ROWS,
   normalizeComments,
   normalizeConditionalFormats,
   normalizeFilterQuery,
+  normalizeHexColor,
   normalizeProtection,
   normalizeValidations,
 } from './sheetMetadataNormalize'
@@ -59,23 +65,75 @@ export function withFreshUniverSnapshot(
   }
 }
 
+let fallbackUnitCounter = 1
+
+export function createWorkbookUnitId(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return `puresheets-${globalThis.crypto.randomUUID()}`
+  }
+  return `puresheets-${Date.now().toString(36)}-${fallbackUnitCounter++}`
+}
+
+function workbookUnitId(document: PureSheetsDocument): string {
+  const existing = document.engine.snapshot
+  if (
+    isRecord(existing) &&
+    typeof existing.id === 'string' &&
+    !isForbiddenKey(existing.id) &&
+    existing.id.trim()
+  ) {
+    return existing.id
+  }
+  return createWorkbookUnitId()
+}
+
+interface StyleRegistry {
+  styles: NonNullable<IWorkbookData['styles']>
+  idByCanonical: Map<string, string>
+  nextId: number
+}
+
+function createStyleRegistry(): StyleRegistry {
+  return { styles: {}, idByCanonical: new Map(), nextId: 1 }
+}
+
+function registerStyle(
+  registry: StyleRegistry,
+  style: CellStyle | undefined,
+): string | null {
+  if (!style) return null
+  const entries = Object.entries(style)
+    .filter(([, value]) => value !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  if (entries.length === 0) return null
+  const canonical = JSON.stringify(entries)
+  let id = registry.idByCanonical.get(canonical)
+  if (!id) {
+    id = `style-${registry.nextId++}`
+    registry.idByCanonical.set(canonical, id)
+    registry.styles[id] = toUniverStyle(style)
+  }
+  return id
+}
+
 export function createUniverSnapshot(
   document: PureSheetsDocument,
 ): PureSheetsUniverSnapshot {
+  const registry = createStyleRegistry()
   const sheets = Object.fromEntries(
     document.workbook.sheets.map(sheet => [
       sheet.id,
-      createUniverSheetSnapshot(sheet),
+      createUniverSheetSnapshot(sheet, registry),
     ]),
   )
 
   return {
-    id: `puresheets-${stableId(document.metadata.title)}`,
+    id: workbookUnitId(document),
     name: document.metadata.title,
     appVersion: UNIVER_APP_VERSION,
     locale: LocaleType.EN_US,
     defaultStyle: CELL_DEFAULT_STYLE,
-    styles: collectStyles(document),
+    styles: registry.styles,
     sheetOrder: document.workbook.sheets.map(sheet => sheet.id),
     sheets,
     custom: {
@@ -107,14 +165,21 @@ export function documentFromUniverSnapshot(
   fallback?: PureSheetsDocument,
 ): PureSheetsDocument {
   const saved = validateUniverSnapshot(snapshot)
-  const sheetOrder = saved.sheetOrder?.length
-    ? saved.sheetOrder
-    : Object.keys(saved.sheets ?? {})
+  const sheetOrder = (
+    saved.sheetOrder?.length
+      ? saved.sheetOrder
+      : Object.keys(saved.sheets ?? {})
+  ).filter(sheetId => typeof sheetId === 'string' && !isForbiddenKey(sheetId))
   const fallbackSheetsById = new Map(
     fallback?.workbook.sheets.map(sheet => [sheet.id, sheet]) ?? [],
   )
   const sheets = sheetOrder.flatMap(sheetId => {
-    const sheet = saved.sheets?.[sheetId]
+    const sheet =
+      saved.sheets &&
+      !isForbiddenKey(sheetId) &&
+      Object.hasOwn(saved.sheets, sheetId)
+        ? saved.sheets[sheetId]
+        : undefined
     if (!sheet) return []
     return [
       workbookSheetFromUniverSheet(
@@ -140,6 +205,12 @@ export function documentFromUniverSnapshot(
       ? custom.activeSheetId
       : sheets[0].id
   const now = new Date().toISOString()
+  const preservedUnitId =
+    typeof saved.id === 'string' &&
+    !isForbiddenKey(saved.id) &&
+    saved.id.trim()
+      ? saved.id
+      : undefined
 
   return withFreshUniverSnapshot({
     app: 'PureSheets',
@@ -147,6 +218,7 @@ export function documentFromUniverSnapshot(
     engine: {
       name: 'univer',
       version: UNIVER_APP_VERSION,
+      ...(preservedUnitId ? { snapshot: { id: preservedUnitId } } : {}),
     },
     metadata: {
       title:
@@ -187,6 +259,7 @@ const CELL_DEFAULT_STYLE = { ff: 'Arial', fs: 10, cl: { rgb: '#3a404a' } }
 
 function createUniverSheetSnapshot(
   sheet: WorkbookSheet,
+  registry: StyleRegistry,
 ): Partial<IWorksheetData> {
   return {
     id: sheet.id,
@@ -195,8 +268,8 @@ function createUniverSheetSnapshot(
     tabColor: '',
     hidden: BooleanNumber.FALSE,
     freeze: {
-      startRow: sheet.frozenRows ? sheet.frozenRows - 1 : -1,
-      startColumn: sheet.frozenColumns ? sheet.frozenColumns - 1 : -1,
+      startRow: sheet.frozenRows ? sheet.frozenRows : -1,
+      startColumn: sheet.frozenColumns ? sheet.frozenColumns : -1,
       ySplit: sheet.frozenRows ?? 0,
       xSplit: sheet.frozenColumns ?? 0,
     },
@@ -216,7 +289,7 @@ function createUniverSheetSnapshot(
         ? [{ startRow: start.row, startColumn: start.column, endRow: end.row, endColumn: end.column }]
         : []
     }),
-    cellData: collectCellData(sheet),
+    cellData: collectCellData(sheet, registry),
     rowData: Object.fromEntries(
       Object.entries(sheet.rowHeights ?? {}).map(([row, height]) => [
         row,
@@ -235,12 +308,12 @@ function createUniverSheetSnapshot(
     rightToLeft: BooleanNumber.FALSE,
     custom: {
       puresheets: {
-        filterRow: sheet.filterRow,
-        filterColumn: sheet.filterColumn,
+        // Keys are ALWAYS written (null when unset) so the restore path can
+        // distinguish "cleared by the user" from "legacy snapshot that never
+        // carried the field" (which falls back).
+        filterRow: sheet.filterRow ?? null,
+        filterColumn: sheet.filterColumn ?? null,
         filterHasHeader: sheet.filterHasHeader ?? null,
-        // Phase S3 metadata. Keys are ALWAYS written (null when unset) so the
-        // restore path can distinguish "cleared by the user" from "legacy
-        // snapshot that never carried the field" (which falls back).
         filterQuery: sheet.filterQuery ?? null,
         comments: sheet.comments ?? null,
         validations: sheet.validations ?? null,
@@ -261,41 +334,67 @@ function workbookSheetFromUniverSheet(
     isRecord(sheet.custom) && isRecord(sheet.custom.puresheets)
       ? sheet.custom.puresheets
       : {}
+  const rawRowCount =
+    positiveInteger(sheet.rowCount) ??
+    fallback?.rowCount ??
+    DEFAULT_ROW_COUNT
+  const rowCount = Math.min(MAX_PERSISTED_ROWS, Math.max(1, rawRowCount))
+  const rawColumnCount =
+    positiveInteger(sheet.columnCount) ??
+    fallback?.columnCount ??
+    DEFAULT_COLUMN_COUNT
+  const columnCount = Math.min(MAX_SHEET_COLUMNS, Math.max(1, rawColumnCount))
+  const rawFrozenRows =
+    typeof sheet.freeze?.ySplit === 'number' &&
+    Number.isFinite(sheet.freeze.ySplit)
+      ? Math.floor(sheet.freeze.ySplit)
+      : fallback?.frozenRows
+  const frozenRows =
+    rawFrozenRows !== undefined
+      ? Math.min(rowCount, Math.max(0, rawFrozenRows))
+      : undefined
+  const rawFrozenColumns =
+    typeof sheet.freeze?.xSplit === 'number' &&
+    Number.isFinite(sheet.freeze.xSplit)
+      ? Math.floor(sheet.freeze.xSplit)
+      : fallback?.frozenColumns
+  const frozenColumns =
+    rawFrozenColumns !== undefined
+      ? Math.min(columnCount, Math.max(0, rawFrozenColumns))
+      : undefined
   return {
     id,
     name:
       typeof sheet.name === 'string' && sheet.name.trim()
         ? sheet.name
         : fallback?.name ?? id,
-    rowCount:
-      positiveInteger(sheet.rowCount) ??
-      fallback?.rowCount ??
-      DEFAULT_ROW_COUNT,
-    columnCount:
-      positiveInteger(sheet.columnCount) ??
-      fallback?.columnCount ??
-      DEFAULT_COLUMN_COUNT,
+    rowCount,
+    columnCount,
     cells: cellsFromUniverSheet(sheet.cellData, styles, fallback?.cells),
     columnWidths:
-      dimensionsFromUniverData(sheet.columnData, 'w') ?? fallback?.columnWidths,
+      dimensionsFromUniverData(sheet.columnData, 'w', MAX_SHEET_COLUMNS - 1) ??
+      fallback?.columnWidths,
     rowHeights:
-      dimensionsFromUniverData(sheet.rowData, 'h') ?? fallback?.rowHeights,
-    frozenRows:
-      typeof sheet.freeze?.ySplit === 'number'
-        ? sheet.freeze.ySplit
-        : fallback?.frozenRows,
-    frozenColumns:
-      typeof sheet.freeze?.xSplit === 'number'
-        ? sheet.freeze.xSplit
-        : fallback?.frozenColumns,
+      dimensionsFromUniverData(sheet.rowData, 'h', MAX_SHEET_ROWS - 1) ??
+      fallback?.rowHeights,
+    frozenRows,
+    frozenColumns,
     merges: Array.isArray(sheet.mergeData)
       ? mergesFromUniverData(sheet.mergeData)
       : fallback?.merges,
-    filterRow: optionalNumber(custom.filterRow) ?? fallback?.filterRow,
-    filterColumn: optionalNumber(custom.filterColumn) ?? fallback?.filterColumn,
+    filterRow:
+      'filterRow' in custom
+        ? optionalNumber(custom.filterRow)
+        : fallback?.filterRow,
+    filterColumn:
+      'filterColumn' in custom
+        ? optionalNumber(custom.filterColumn)
+        : fallback?.filterColumn,
     filterHasHeader:
-      typeof custom.filterHasHeader === 'boolean'
-        ? custom.filterHasHeader
+      'filterHasHeader' in custom
+        ? typeof custom.filterHasHeader === 'boolean'
+          ? custom.filterHasHeader
+          : undefined
         : fallback?.filterHasHeader,
     // Phase S3 metadata: when the snapshot carries the key (even as null),
     // the snapshot wins; a missing key means a legacy snapshot → fallback.
@@ -349,10 +448,21 @@ function cellsFromUniverSheet(
       if (!key || !cell) continue
       const value = univerCellValue(cell)
       if (!value && !cell.f && !cell.s) continue
-      const univerStyle = typeof cell.s === 'string' ? styles?.[cell.s] ?? undefined : undefined
+      const univerStyle =
+        typeof cell.s === 'string'
+          ? styles && Object.hasOwn(styles, cell.s)
+            ? styles[cell.s] ?? undefined
+            : undefined
+          : isRecord(cell.s)
+          ? (cell.s as IStyleData)
+          : undefined
       let style = fromUniverStyle(univerStyle)
       // Every styled cell renders middle, so a chosen middle (an Excel import's) is kept from the model.
-      if (univerStyle?.vt === VerticalAlign.MIDDLE && fallbackCells?.[key]?.style?.verticalAlign === 'middle')
+      const fallbackCell =
+        fallbackCells && Object.hasOwn(fallbackCells, key)
+          ? fallbackCells[key]
+          : undefined
+      if (univerStyle?.vt === VerticalAlign.MIDDLE && fallbackCell?.style?.verticalAlign === 'middle')
         style = { ...style, verticalAlign: 'middle' }
       const custom = cell.custom as { puresheetsKind?: unknown; puresheetsNumberText?: unknown } | undefined
       const preservedNumber = custom?.puresheetsKind === 'number' && (
@@ -397,9 +507,12 @@ function fromUniverStyle(style: IStyleData | undefined): CellStyle | undefined {
   if (typeof style.ul === 'object' ? style.ul?.s : style.ul) {
     cellStyle.underline = true
   }
-  if (typeof style.fs === 'number') cellStyle.fontSize = style.fs
-  if (typeof style.cl?.rgb === 'string') cellStyle.textColor = style.cl.rgb
-  if (typeof style.bg?.rgb === 'string') cellStyle.fillColor = style.bg.rgb
+  const fontSize = clampFontSize(style.fs)
+  if (fontSize !== undefined) cellStyle.fontSize = fontSize
+  const textColor = normalizeHexColor(style.cl?.rgb)
+  if (textColor) cellStyle.textColor = textColor
+  const fillColor = normalizeHexColor(style.bg?.rgb)
+  if (fillColor) cellStyle.fillColor = fillColor
   const sides = BORDER_SIDES.filter(
     ([key]) => style.bd?.[key] && style.bd[key]?.s !== BorderStyleTypes.NONE,
   ).map(([, side]) => side)
@@ -421,35 +534,49 @@ function fromUniverStyle(style: IStyleData | undefined): CellStyle | undefined {
 function dimensionsFromUniverData(
   data: IWorksheetData['rowData'] | IWorksheetData['columnData'] | undefined,
   key: 'h' | 'w',
+  maxIndex: number,
 ): Record<string, number> | undefined {
   const dimensions: Record<string, number> = {}
   for (const [index, value] of Object.entries(data ?? {})) {
+    if (isForbiddenKey(index) || !/^(0|[1-9][0-9]*)$/.test(index)) continue
+    const numericIndex = Number(index)
+    if (
+      !Number.isSafeInteger(numericIndex) ||
+      numericIndex < 0 ||
+      numericIndex > maxIndex
+    ) {
+      continue
+    }
     // Native auto-fit stores its measured height in ah, separately from the
     // manual minimum h. Carry the displayed height into model-driven reloads.
     const row = value as { h?: number; ah?: number; ia?: BooleanNumber } | undefined
     const dimension = key === 'h' && row?.ia !== BooleanNumber.FALSE &&
       typeof row?.ah === 'number' && row.ah > 0 ? row.ah : value?.[key]
-    if (typeof dimension === 'number' && Number.isFinite(dimension)) {
-      dimensions[index] = dimension
+    if (typeof dimension === 'number' && Number.isFinite(dimension) && dimension > 0) {
+      dimensions[index] = Math.min(2000, Math.max(1, dimension))
     }
   }
   return Object.keys(dimensions).length ? dimensions : undefined
 }
 
-function collectCellData(sheet: WorkbookSheet): IWorksheetData['cellData'] {
+function collectCellData(
+  sheet: WorkbookSheet,
+  registry: StyleRegistry,
+): IWorksheetData['cellData'] {
   const rows: IWorksheetData['cellData'] = {}
   for (const [key, cell] of Object.entries(sheet.cells)) {
     const position = parseCellKey(key)
     if (!position) continue
-    rows[position.row] = {
-      ...rows[position.row],
-      [position.column]: createUniverCell(cell),
-    }
+    const row = rows[position.row] ?? (rows[position.row] = {})
+    row[position.column] = createUniverCell(cell, registry)
   }
   return rows
 }
 
-function createUniverCell(cell: SheetCell): ICellData {
+function createUniverCell(
+  cell: SheetCell,
+  registry: StyleRegistry,
+): ICellData {
   const value = cell.value
   const data: ICellData = {}
   if (cell.kind === 'formula') {
@@ -471,26 +598,9 @@ function createUniverCell(cell: SheetCell): ICellData {
     data.v = value
     data.t = CellValueType.STRING
   }
-  const styleId = styleKey(cell.style)
+  const styleId = registerStyle(registry, cell.style)
   if (styleId) data.s = styleId
   return data
-}
-
-function collectStyles(document: PureSheetsDocument): IWorkbookData['styles'] {
-  const styles: IWorkbookData['styles'] = {}
-  for (const sheet of document.workbook.sheets) {
-    for (const cell of Object.values(sheet.cells)) {
-      const id = styleKey(cell.style)
-      if (!id || styles[id]) continue
-      styles[id] = toUniverStyle(cell.style)
-    }
-  }
-  return styles
-}
-
-function styleKey(style: CellStyle | undefined): string | null {
-  if (!style || Object.keys(style).length === 0) return null
-  return `style-${stableId(JSON.stringify(Object.entries(style).sort()))}`
 }
 
 function toUniverStyle(style: CellStyle | undefined): IStyleData {
@@ -501,9 +611,12 @@ function toUniverStyle(style: CellStyle | undefined): IStyleData {
   if (style.italic) data.it = BooleanNumber.TRUE
   if (style.underline)
     data.ul = { s: BooleanNumber.TRUE, t: TextDecoration.SINGLE }
-  if (style.fontSize) data.fs = style.fontSize
-  if (style.textColor) data.cl = { rgb: style.textColor }
-  if (style.fillColor) data.bg = { rgb: style.fillColor }
+  const fontSize = clampFontSize(style.fontSize)
+  if (fontSize !== undefined) data.fs = fontSize
+  const textColor = normalizeHexColor(style.textColor)
+  if (textColor) data.cl = { rgb: textColor }
+  const fillColor = normalizeHexColor(style.fillColor)
+  if (fillColor) data.bg = { rgb: fillColor }
   const sides = style.border
     ? BORDER_SIDES
     : BORDER_SIDES.filter(([, side]) => style.borderSides?.includes(side))
@@ -539,18 +652,26 @@ function horizontalAlign(
 }
 
 function parseCellKey(key: string): { row: number; column: number } | null {
-  const match = /^([A-Z]+)([1-9][0-9]*)$/i.exec(key.trim())
+  const match = /^([A-Z]{1,3})([1-9][0-9]*)$/i.exec(key.trim())
   if (!match) return null
-  return {
-    row: Number(match[2]) - 1,
-    column:
-      match[1]
-        .toUpperCase()
-        .split('')
-        .reduce((total, letter) => {
-          return total * 26 + letter.charCodeAt(0) - 64
-        }, 0) - 1,
+  const row = Number(match[2]) - 1
+  const column =
+    match[1]
+      .toUpperCase()
+      .split('')
+      .reduce((total, letter) => {
+        return total * 26 + letter.charCodeAt(0) - 64
+      }, 0) - 1
+  if (
+    !Number.isSafeInteger(row) ||
+    row < 0 ||
+    row >= MAX_SHEET_ROWS ||
+    column < 0 ||
+    column >= MAX_SHEET_COLUMNS
+  ) {
+    return null
   }
+  return { row, column }
 }
 
 function toCellKey(row: number, column: number): string | null {
@@ -558,7 +679,9 @@ function toCellKey(row: number, column: number): string | null {
     !Number.isInteger(row) ||
     !Number.isInteger(column) ||
     row < 0 ||
-    column < 0
+    column < 0 ||
+    row >= MAX_SHEET_ROWS ||
+    column >= MAX_SHEET_COLUMNS
   ) {
     return null
   }
@@ -584,12 +707,4 @@ function optionalNumber(value: unknown): number | undefined {
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input)
-}
-
-function stableId(input: string): string {
-  let hash = 0
-  for (let index = 0; index < input.length; index += 1) {
-    hash = (hash * 31 + input.charCodeAt(index)) >>> 0
-  }
-  return hash.toString(36)
 }

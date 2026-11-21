@@ -379,7 +379,7 @@ describe('workbook calculations', () => {
 
     expect(displayCellValue(sheet, 'A1')).toBe('#NAME?')
     expect(displayCellValue(sheet, 'A2')).toBe('#DIV/0!')
-    expect(displayCellValue(sheet, 'A3')).toBe('#VALUE')
+    expect(displayCellValue(sheet, 'A3')).toBe('#VALUE!')
     expect(isFormulaError(displayCellValue(sheet, 'A1'))).toBe(true)
     expect(isFormulaError('42')).toBe(false)
   })

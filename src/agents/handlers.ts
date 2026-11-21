@@ -10,7 +10,10 @@ import {
   addChartToSheet,
   addSheet,
   appendAgentLog,
+  cellKey,
   deleteSheet,
+  isCellLocked,
+  parseRangeBounds,
   renameSheet,
   setRangeStyle,
   setColumnWidth,
@@ -23,6 +26,7 @@ import {
   normalizeRangeToken,
   setCellComment,
 } from '../lib/workbookModel'
+import { clampFontSize, normalizeHexColor } from '../lib/sheetMetadataNormalize'
 import type {
   CellValueKind,
   PureSheetsDocument,
@@ -49,6 +53,8 @@ const CELL_KINDS: ReadonlySet<string> = new Set([
 
 const READ_CELL_CAP = 500
 const CHANGE_CAP = 400
+const FORMAT_CELL_CAP = 5_000
+const MAX_COMMENT_LENGTH = 8_192
 
 export async function autoFitRowsHandler(context: SheetsAgentToolContext, args: Record<string, unknown>): Promise<AgentToolHandlerResult> {
   const document = requireDocument(context)
@@ -198,7 +204,7 @@ export function findInWorkbookHandler(
   }
   const matches: Array<{ sheet: string; cell: string; value: string }> = []
   for (const sheet of sheets) {
-    for (const key of findMatches(sheet, query)) {
+    for (const key of findMatches(sheet, query, {}, document.workbook)) {
       matches.push({
         sheet: sheet.name,
         cell: key,
@@ -380,8 +386,18 @@ export async function addSheetHandler(
     return agentToolErrorContent(`A sheet named "${name}" already exists.`)
   }
   let created = ''
+  let changed = false
   context.setDocument(current => {
+    if (
+      name &&
+      current.workbook.sheets.some(
+        sheet => sheet.name.toLowerCase() === name.toLowerCase(),
+      )
+    ) {
+      return current
+    }
     let next = addSheet(current, name || undefined)
+    if (next === current) return current
     const sheet = next.workbook.sheets[next.workbook.sheets.length - 1]
     created = sheet?.name ?? ''
     if (sheet) {
@@ -393,8 +409,16 @@ export async function addSheetHandler(
         sheetName: sheet.name,
       })
     }
+    changed = true
     return next
   })
+  if (!changed) {
+    return agentToolErrorContent(
+      name
+        ? `A sheet named "${name}" already exists.`
+        : 'Could not add sheet.',
+    )
+  }
   return {
     content: formatAgentToolJson({ sheet: created }),
   }
@@ -412,21 +436,41 @@ export async function setCellCommentHandler(
       'No matching sheet. getSheetsContext lists them.',
     )
   }
-  const cellArg = readAgentToolStringArg(args, 'cell')
-  const cell = cellArg ? normalizeRangeToken(cellArg) : null
-  if (!cell || cell.includes(':')) {
+  const cellArg = readAgentToolStringArg(args, 'cell')?.trim() ?? ''
+  const parsedCell = !cellArg.includes(':') ? parseCellKey(cellArg) : null
+  if (!parsedCell) {
     return agentToolErrorContent('Pass "cell": one A1 cell, e.g. "B4".')
   }
+  const cell = cellKey(parsedCell.row, parsedCell.column)
+  if (isCellLocked(sheet, cell)) {
+    return agentToolErrorContent(
+      `${cell} is protected — unlock the range before editing notes.`,
+    )
+  }
   const comment = readAgentToolStringArg(args, 'comment') ?? ''
+  if (comment.length > MAX_COMMENT_LENGTH) {
+    return agentToolErrorContent(
+      `Comment exceeds the maximum length of ${MAX_COMMENT_LENGTH} characters.`,
+    )
+  }
+  let changed = false
+  let locked = false
   context.setDocument(current => {
+    const target = current.workbook.sheets.find(
+      candidate => candidate.id === sheet.id,
+    )
+    if (!target) return current
+    if (isCellLocked(target, cell)) {
+      locked = true
+      return current
+    }
+    const updatedSheet = setCellComment(target, cell, comment)
     let next: PureSheetsDocument = {
       ...current,
       workbook: {
         ...current.workbook,
         sheets: current.workbook.sheets.map(candidate =>
-          candidate.id === sheet.id
-            ? setCellComment(candidate, cell, comment)
-            : candidate,
+          candidate.id === sheet.id ? updatedSheet : candidate,
         ),
       },
     }
@@ -440,8 +484,17 @@ export async function setCellCommentHandler(
       sheetName: sheet.name,
       range: cell,
     })
+    changed = true
     return next
   })
+  if (locked) {
+    return agentToolErrorContent(
+      `${cell} is protected — unlock the range before editing notes.`,
+    )
+  }
+  if (!changed) {
+    return agentToolErrorContent('Sheet is no longer available; nothing applied.')
+  }
   return {
     content: formatAgentToolJson({
       sheet: sheet.name,
@@ -502,8 +555,17 @@ export async function formatRangeHandler(
   }
   const rangeArg = readAgentToolStringArg(args, 'range')
   const range = rangeArg ? normalizeRangeToken(rangeArg) : null
-  if (!range) {
+  const bounds = range ? parseRangeBounds(range) : null
+  if (!range || !bounds) {
     return agentToolErrorContent('Pass "range": the A1 range to format.')
+  }
+  const spanCount =
+    (bounds.end.row - bounds.start.row + 1) *
+    (bounds.end.column - bounds.start.column + 1)
+  if (!Number.isSafeInteger(spanCount) || spanCount > FORMAT_CELL_CAP) {
+    return agentToolErrorContent(
+      `${range} spans ${spanCount} cells — format at most ${FORMAT_CELL_CAP} cells at a time; narrow the range.`,
+    )
   }
   const patch: Record<string, unknown> = {}
   if (args.wrap !== undefined && !['wrap', 'clip', 'overflow'].includes(args.wrap as string))
@@ -519,16 +581,17 @@ export async function formatRangeHandler(
   for (const key of ['bold', 'italic', 'underline', 'border'] as const) {
     if (typeof args[key] === 'boolean') patch[key] = args[key]
   }
-  if (typeof args.fontSize === 'number' && Number.isFinite(args.fontSize)) {
-    patch.fontSize = args.fontSize
+  const fontSize = clampFontSize(args.fontSize)
+  if (fontSize !== undefined) {
+    patch.fontSize = fontSize
   }
   if (typeof args.decimals === 'number' && Number.isFinite(args.decimals)) {
     patch.decimals = Math.max(0, Math.min(8, Math.floor(args.decimals)))
   }
   for (const key of ['textColor', 'fillColor'] as const) {
-    const value = args[key]
-    if (typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value.trim())) {
-      patch[key] = value.trim()
+    const normalizedColor = normalizeHexColor(args[key])
+    if (normalizedColor) {
+      patch[key] = normalizedColor
     }
   }
   const align = readAgentToolStringArg(args, 'align')
@@ -545,14 +608,24 @@ export async function formatRangeHandler(
   const summary =
     readAgentToolStringArg(args, 'summary')?.trim() ||
     `Formatted ${range} on ${sheet.name}`
+  let changed = false
   context.setDocument(current => {
     const target = current.workbook.sheets.find(item => item.id === sheet.id)
     if (!target) return current
     if (resizing && target.protection?.lockedRanges?.length) return current
-    let nextSheet = Object.keys(patch).length ? setRangeStyle(target, range, patch) : target
-    const positions = cellsInRange(range).map(parseCellKey).filter(position => position !== null)
-    if (typeof args.columnWidth === 'number') for (const column of new Set(positions.map(position => position.column))) nextSheet = setColumnWidth(nextSheet, column, args.columnWidth)
-    if (typeof args.rowHeight === 'number') for (const row of new Set(positions.map(position => position.row))) nextSheet = setRowHeight(nextSheet, row, args.rowHeight)
+    let nextSheet = Object.keys(patch).length
+      ? setRangeStyle(target, range, patch, FORMAT_CELL_CAP)
+      : target
+    if (typeof args.columnWidth === 'number') {
+      for (let col = bounds.start.column; col <= bounds.end.column; col += 1) {
+        nextSheet = setColumnWidth(nextSheet, col, args.columnWidth)
+      }
+    }
+    if (typeof args.rowHeight === 'number') {
+      for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
+        nextSheet = setRowHeight(nextSheet, row, args.rowHeight)
+      }
+    }
     if (nextSheet === target) return current
     let next: PureSheetsDocument = {
       ...current,
@@ -571,8 +644,14 @@ export async function formatRangeHandler(
       sheetName: sheet.name,
       range,
     })
+    changed = true
     return next
   })
+  if (!changed) {
+    return agentToolErrorContent(
+      'Formatting could not be applied (sheet missing or protected).',
+    )
+  }
   return {
     content: formatAgentToolJson({
       sheet: sheet.name,
@@ -609,6 +688,7 @@ export async function renameSheetHandler(
     return agentToolErrorContent(`A sheet named "${name}" already exists.`)
   }
   const previous = sheet.name
+  let changed = false
   context.setDocument(current => {
     let next = renameSheet(current, sheet.id, name)
     if (next === current) return current
@@ -619,8 +699,16 @@ export async function renameSheetHandler(
       sheetId: sheet.id,
       sheetName: name,
     })
+    changed = true
     return next
   })
+  if (!changed) {
+    return agentToolErrorContent(
+      previous === name
+        ? `Sheet is already named "${name}".`
+        : `Could not rename sheet "${previous}" to "${name}".`,
+    )
+  }
   return {
     content: formatAgentToolJson({ sheet: name, previous }),
   }
@@ -644,10 +732,12 @@ export async function deleteSheetHandler(
       'No matching sheet. getSheetsContext lists them.',
     )
   }
-  if (document.workbook.sheets.length <= 1) {
+  const visibleSheets = document.workbook.sheets.filter(s => !s.agentDraft)
+  if (!sheet.agentDraft && visibleSheets.length <= 1) {
     return agentToolErrorContent('The last sheet of a workbook cannot be deleted.')
   }
   const populated = Object.keys(sheet.cells).length
+  let changed = false
   context.setDocument(current => {
     let next = deleteSheet(current, sheet.id)
     if (next === current) return current
@@ -658,8 +748,12 @@ export async function deleteSheetHandler(
       sheetId: sheet.id,
       sheetName: sheet.name,
     })
+    changed = true
     return next
   })
+  if (!changed) {
+    return agentToolErrorContent('Could not delete that sheet.')
+  }
   return {
     content: formatAgentToolJson({
       deleted: sheet.name,

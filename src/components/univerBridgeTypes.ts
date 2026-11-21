@@ -49,6 +49,7 @@ export type UniverEditorBridge = {
   setFrozenRows: (rows: number) => Promise<boolean>
   setRowHeight: (row: number, height: number) => Promise<boolean>
   autoFitRows: (sheetId: string, rows: number[]) => Promise<boolean>
+  autoFitColumns?: (sheetId: string, columns: number[]) => Promise<boolean>
   setCellValue: (cell: string, value: string) => Promise<boolean>
   // True while the user is actively typing in a cell (edit box open) but has
   // not yet committed with Enter/Tab.
@@ -95,6 +96,11 @@ export type UniverFacadeWorksheet = {
     setHorizontalAlignment?: (
       alignment: 'left' | 'center' | 'normal',
     ) => unknown
+    setVerticalAlignment?: (
+      alignment: 'top' | 'middle' | 'bottom',
+    ) => unknown
+    setWrap?: (isWrap: boolean) => unknown
+    setWrapStrategy?: (strategy: unknown) => unknown
     setNumberFormat?: (pattern: string) => unknown
     setValue?: (value: string | number | boolean) => unknown
     setValues?: (
@@ -137,6 +143,8 @@ export type UniverFacadeWorksheet = {
   setFrozenRows?: (rows: number) => unknown
   setRowHeight?: (rowPosition: number, height: number) => unknown
   autoFitRow?: (rowPosition: number) => unknown
+  autoResizeColumn?: (columnPosition: number) => unknown
+  getMaxColumns?: () => number
   setName?: (name: string) => unknown
 }
 

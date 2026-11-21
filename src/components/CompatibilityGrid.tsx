@@ -13,6 +13,7 @@ import {
   parseCellKey,
 } from '../lib/workbookModel'
 import { conditionalStyleForCell } from '../lib/sheetDataFeatures'
+import { clampFontSize, normalizeHexColor } from '../lib/sheetMetadataNormalize'
 import type { CellStyle, WorkbookSheet } from '../types'
 
 /**
@@ -88,7 +89,7 @@ export function CompatibilityGrid({
       }
     }
     return map
-  }, [sheet])
+  }, [sheet, workbook])
   const lockedCells = useMemo(() => {
     const locked = new Set<string>()
     for (const range of sheet.protection?.lockedRanges ?? []) {
@@ -218,10 +219,12 @@ function RowFragment({
             $italic={style.italic}
             $underline={style.underline}
             $align={style.align}
-            $fill={style.fillColor}
-            $fontSize={style.fontSize}
+            $verticalAlign={style.verticalAlign}
+            $wrap={style.wrap}
+            $fill={normalizeHexColor(style.fillColor)}
+            $fontSize={clampFontSize(style.fontSize)}
             $height={sheet.rowHeights?.[String(row)]}
-            $color={style.textColor}
+            $color={normalizeHexColor(style.textColor)}
             $bordered={style.border}
             $frozenRow={frozenRow}
             $frozenColumn={frozenColumn && column === 0}
@@ -266,7 +269,7 @@ function RowFragment({
               onPaste(key, text)
             }}
           >
-            {displayValue}
+            <CellText $wrap={style.wrap}>{displayValue}</CellText>
           </DataCell>
         )
       })}
@@ -339,6 +342,8 @@ const DataCell = styled.button<{
   $italic?: boolean
   $underline?: boolean
   $align?: 'left' | 'center' | 'right'
+  $verticalAlign?: 'top' | 'middle' | 'bottom'
+  $wrap?: 'wrap' | 'clip' | 'overflow'
   $fill?: string
   $fontSize?: number
   $height?: number
@@ -356,6 +361,19 @@ const DataCell = styled.button<{
   left: ${({ $frozenColumn }) => ($frozenColumn ? '44px' : 'auto')};
   z-index: ${({ $frozenRow, $frozenColumn }) =>
     $frozenRow && $frozenColumn ? 3 : $frozenRow || $frozenColumn ? 2 : 0};
+  display: flex;
+  align-items: ${({ $verticalAlign }) =>
+    $verticalAlign === 'top'
+      ? 'flex-start'
+      : $verticalAlign === 'bottom'
+      ? 'flex-end'
+      : 'center'};
+  justify-content: ${({ $align }) =>
+    $align === 'center'
+      ? 'center'
+      : $align === 'right'
+      ? 'flex-end'
+      : 'flex-start'};
   min-height: ${({ $height }) => $height ?? 32}px;
   border: 0;
   border-right: 1px solid
@@ -370,26 +388,30 @@ const DataCell = styled.button<{
   }};
   outline: 0;
   background: ${({ $error, $fill, $selected, $inRange, $locked }) => {
+    const safeFill = normalizeHexColor($fill)
     if ($error) return '#fff1f0'
-    if ($fill) return $fill
+    if (safeFill) return safeFill
     if ($selected || $inRange)
       return 'var(--app-bg, color-mix(in srgb, var(--app-acc, #007eaa) 9%, #ffffff))'
     if ($locked)
       return 'color-mix(in srgb, var(--sheets-surface) 55%, var(--sheets-canvas))'
     return 'var(--sheets-canvas)'
   }};
-  color: ${({ $error, $color }) =>
-    $error ? '#982d25' : $color ?? 'var(--sheets-ink)'};
+  color: ${({ $error, $color }) => {
+    const safeColor = normalizeHexColor($color)
+    return $error ? '#982d25' : safeColor ?? 'var(--sheets-ink)'
+  }};
   padding: 6px 8px;
   overflow: hidden;
   font-family: var(--sheets-mono);
-  font-size: ${({ $fontSize }) => $fontSize ?? 12}px;
+  font-size: ${({ $fontSize }) => clampFontSize($fontSize) ?? 12}px;
   font-style: ${({ $italic }) => ($italic ? 'italic' : 'normal')};
   font-weight: ${({ $error, $bold }) => ($error || $bold ? 700 : 400)};
   text-align: ${({ $align }) => $align ?? 'left'};
   text-decoration: ${({ $underline }) => ($underline ? 'underline' : 'none')};
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: ${({ $wrap }) => ($wrap === 'wrap' ? 'pre-wrap' : 'nowrap')};
+  word-break: ${({ $wrap }) => ($wrap === 'wrap' ? 'break-word' : 'normal')};
 
   /* Comment corner mark (quiet amber triangle, top-right). */
   ${({ $hasComment }) =>
@@ -416,4 +438,14 @@ const DataCell = styled.button<{
           border-bottom: 2px dotted #b3261e;
         }`
       : ''}
+`
+
+const CellText = styled.span<{ $wrap?: 'wrap' | 'clip' | 'overflow' }>`
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: ${({ $wrap }) => ($wrap === 'wrap' ? 'pre-wrap' : 'nowrap')};
+  word-break: ${({ $wrap }) => ($wrap === 'wrap' ? 'break-word' : 'normal')};
 `

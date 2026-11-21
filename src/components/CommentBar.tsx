@@ -2,18 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
 import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
+import { parseCellKey } from '../lib/workbookModel'
 
-const CELL_KEY = /^([A-Za-z]+)(\d+)$/
-// Reading order: top-to-bottom, then left-to-right, with numeric row compare so
-// A2 sorts before A10.
+// Sort by numeric column index then row so A2 < A10 and B1 < AA1.
 function compareCells(a: string, b: string): number {
-  const ma = CELL_KEY.exec(a)
-  const mb = CELL_KEY.exec(b)
-  if (!ma || !mb) return a.localeCompare(b)
-  const rowA = Number.parseInt(ma[2], 10)
-  const rowB = Number.parseInt(mb[2], 10)
-  if (rowA !== rowB) return rowA - rowB
-  return ma[1].localeCompare(mb[1])
+  const pa = parseCellKey(a)
+  const pb = parseCellKey(b)
+  if (!pa || !pb) return a.localeCompare(b)
+  if (pa.column !== pb.column) return pa.column - pb.column
+  return pa.row - pb.row
 }
 
 /**

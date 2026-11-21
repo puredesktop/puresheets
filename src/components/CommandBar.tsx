@@ -5,6 +5,9 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
+  AlignVerticalJustifyStart,
   ArrowDownAZ,
   ArrowDownToLine,
   ArrowRightToLine,
@@ -13,6 +16,7 @@ import {
   Bold,
   Calculator,
   CaseSensitive,
+  ChevronUp,
   Clipboard,
   ClipboardType,
   Columns3,
@@ -30,20 +34,27 @@ import {
   Maximize2,
   MessageSquarePlus,
   Minimize2,
+  MoveHorizontal,
+  MoveVertical,
   PaintBucket,
   PaintRoller,
   PanelLeft,
   PanelTop,
   Redo2,
+  RemoveFormatting,
+  RotateCcw,
   Scissors,
   Search,
+  Snowflake,
   Table,
+  TableCellsMerge,
   TableColumnsSplit,
   TableRowsSplit,
   Trash2,
   Type,
   Underline,
   Undo2,
+  WrapText,
   X,
 } from 'lucide-react'
 import { PlatformIcon } from '@purescience/platform-ui/components/chrome/PlatformIcon'
@@ -154,6 +165,9 @@ const CHART_TYPE_MENU_OPTIONS: Array<{
 export type ImportExportAction =
   | 'import-csv'
   | 'export-csv'
+  | 'export-selection-csv'
+  | 'export-selection-tsv'
+  | 'export-selection-json'
   | 'import-xlsx'
   | 'export-xlsx'
 
@@ -163,6 +177,9 @@ const IMPORT_EXPORT_OPTIONS: Array<{
 }> = [
   { value: 'import-csv', label: 'Import CSV as new sheet…' },
   { value: 'export-csv', label: 'Export sheet as CSV…' },
+  { value: 'export-selection-csv', label: 'Export selection as CSV…' },
+  { value: 'export-selection-tsv', label: 'Export selection as TSV…' },
+  { value: 'export-selection-json', label: 'Export selection as JSON…' },
   { value: 'import-xlsx', label: 'Open Excel workbook (.xlsx)…' },
   { value: 'export-xlsx', label: 'Save as Excel (.xlsx)…' },
 ]
@@ -177,8 +194,13 @@ export function CommandBar({
   selectedStyle,
   canUndo,
   canRedo,
+  findOpen: controlledFindOpen,
+  onFindOpenChange,
+  findFocusRequest = 0,
   findText,
   replaceText,
+  findMatchCount = 0,
+  findActiveIndex = -1,
   onUndo,
   onRedo,
   onCopySelectedRange,
@@ -186,12 +208,19 @@ export function CommandBar({
   onToggleStyle,
   onApplyCellStyle,
   onClearSelectedRange,
+  onClearFormatting,
+  hasMergeInSelection = false,
+  onToggleMerge,
   onSortSelectedRange,
+  sortHasHeader = false,
+  onToggleSortHeader,
   onToggleFilter,
   onToggleFirstRowFreeze,
   onToggleFirstColumnFreeze,
+  onFreezeToActiveCell,
   firstRowFrozen,
   firstColumnFrozen,
+  customFreezeActive = false,
   onCreateChart,
   onInsertRow,
   onDeleteRow,
@@ -199,6 +228,8 @@ export function CommandBar({
   onDeleteColumn,
   onResizeColumn,
   onResizeRow,
+  onAutoFitColumns,
+  onAutoFitRows,
   onPasteValuesOnly,
   onPasteFormattingOnly,
   onFillDown,
@@ -209,6 +240,7 @@ export function CommandBar({
   onFindTextChange,
   onReplaceTextChange,
   onFindNext,
+  onFindPrevious,
   onReplaceMatches,
   matchCase,
   onToggleMatchCase,
@@ -236,8 +268,13 @@ export function CommandBar({
   selectedStyle: CellStyle | undefined
   canUndo: boolean
   canRedo: boolean
+  findOpen?: boolean
+  onFindOpenChange?: (open: boolean) => void
+  findFocusRequest?: number
   findText: string
   replaceText: string
+  findMatchCount?: number
+  findActiveIndex?: number
   onUndo: () => void
   onRedo: () => void
   onCopySelectedRange: (cut?: boolean) => Promise<void>
@@ -245,13 +282,20 @@ export function CommandBar({
   onToggleStyle: (style: 'bold' | 'italic' | 'underline') => void
   onApplyCellStyle: (patch: Partial<CellStyle>, message?: string) => void
   onClearSelectedRange: () => void
+  onClearFormatting?: () => void
+  hasMergeInSelection?: boolean
+  onToggleMerge?: () => void
   onSortSelectedRange: (direction: 'asc' | 'desc') => void
+  sortHasHeader?: boolean
+  onToggleSortHeader?: () => void
   onToggleFilter: () => void
   onToggleFirstRowFreeze: () => void
   onToggleFirstColumnFreeze: () => void
+  onFreezeToActiveCell?: () => void
   /** Reflect the frozen state so the buttons read "Unfreeze …" when active. */
   firstRowFrozen: boolean
   firstColumnFrozen: boolean
+  customFreezeActive?: boolean
   onCreateChart: (type: WorkbookChart['type']) => void
   onInsertRow: () => void
   onDeleteRow: () => void
@@ -259,6 +303,8 @@ export function CommandBar({
   onDeleteColumn: () => void
   onResizeColumn: (delta: number) => void
   onResizeRow: (delta: number) => void
+  onAutoFitColumns?: () => void
+  onAutoFitRows?: () => void
   onPasteValuesOnly: () => void
   onPasteFormattingOnly: () => void
   onFillDown: () => void
@@ -269,6 +315,7 @@ export function CommandBar({
   onFindTextChange: (value: string) => void
   onReplaceTextChange: (value: string) => void
   onFindNext: () => void
+  onFindPrevious?: () => void
   onReplaceMatches: () => void
   matchCase: boolean
   onToggleMatchCase: () => void
@@ -315,12 +362,18 @@ export function CommandBar({
       ?.label ?? 'Text'
   const toolbarId = useId()
   const [section, setSection] = useState<'Format' | 'Data' | 'Edit'>('Format')
-  const [findOpen, setFindOpen] = useState(false)
+  const [internalFindOpen, setInternalFindOpen] = useState(false)
+  const findOpen = controlledFindOpen ?? internalFindOpen
+  const setFindOpen = (next: boolean | ((open: boolean) => boolean)): void => {
+    const resolved = typeof next === 'function' ? next(findOpen) : next
+    if (onFindOpenChange) onFindOpenChange(resolved)
+    else setInternalFindOpen(resolved)
+  }
   const findInputRef = useRef<HTMLInputElement>(null)
   const findTriggerRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     if (findOpen) findInputRef.current?.focus()
-  }, [findOpen])
+  }, [findOpen, findFocusRequest])
   const [filterDraft, setFilterDraft] = useState(filterQuery)
   useEffect(() => {
     setFilterDraft(filterQuery)
@@ -444,6 +497,18 @@ export function CommandBar({
               }
             />
           </ColorControl>
+          {selectedStyle?.textColor && (
+            <ToolIconButton
+              title="Reset text color"
+              onClick={() =>
+                onApplyCellStyle(
+                  { textColor: undefined },
+                  'Reset text color',
+                )
+              }
+              icon={RotateCcw}
+            />
+          )}
           <ColorControl title="Fill color">
             <PlatformIcon icon={PaintBucket} size={15} strokeWidth={1.9} />
             <input
@@ -455,6 +520,18 @@ export function CommandBar({
               }
             />
           </ColorControl>
+          {selectedStyle?.fillColor && (
+            <ToolIconButton
+              title="Reset fill color"
+              onClick={() =>
+                onApplyCellStyle(
+                  { fillColor: undefined },
+                  'Reset fill color',
+                )
+              }
+              icon={RotateCcw}
+            />
+          )}
           <ToolIconButton
             title="Toggle all borders"
             aria-pressed={Boolean(selectedStyle?.border)}
@@ -466,6 +543,21 @@ export function CommandBar({
             }
             icon={Grid2X2}
           />
+          {onToggleMerge && (
+            <ToolIconButton
+              title={hasMergeInSelection ? 'Unmerge cells' : 'Merge cells'}
+              aria-pressed={hasMergeInSelection}
+              onClick={onToggleMerge}
+              icon={TableCellsMerge}
+            />
+          )}
+          {onClearFormatting && (
+            <ToolIconButton
+              title="Clear formatting"
+              onClick={onClearFormatting}
+              icon={RemoveFormatting}
+            />
+          )}
           <ToolIconButton
             title="Clear selected range"
             onClick={onClearSelectedRange}
@@ -491,6 +583,43 @@ export function CommandBar({
             aria-pressed={selectedStyle?.align === 'right'}
             onClick={() => onApplyCellStyle({ align: 'right' })}
             icon={AlignRight}
+          />
+          <ToolIconButton
+            title="Align top"
+            aria-pressed={selectedStyle?.verticalAlign === 'top'}
+            onClick={() =>
+              onApplyCellStyle({ verticalAlign: 'top' }, 'Aligned top')
+            }
+            icon={AlignVerticalJustifyStart}
+          />
+          <ToolIconButton
+            title="Align middle"
+            aria-pressed={selectedStyle?.verticalAlign === 'middle'}
+            onClick={() =>
+              onApplyCellStyle({ verticalAlign: 'middle' }, 'Aligned middle')
+            }
+            icon={AlignVerticalJustifyCenter}
+          />
+          <ToolIconButton
+            title="Align bottom"
+            aria-pressed={selectedStyle?.verticalAlign === 'bottom'}
+            onClick={() =>
+              onApplyCellStyle({ verticalAlign: 'bottom' }, 'Aligned bottom')
+            }
+            icon={AlignVerticalJustifyEnd}
+          />
+          <ToolIconButton
+            title="Wrap text"
+            aria-pressed={selectedStyle?.wrap === 'wrap'}
+            onClick={() =>
+              onApplyCellStyle(
+                { wrap: selectedStyle?.wrap === 'wrap' ? 'overflow' : 'wrap' },
+                selectedStyle?.wrap === 'wrap'
+                  ? 'Disabled text wrap'
+                  : 'Enabled text wrap',
+              )
+            }
+            icon={WrapText}
           />
         </ToolbarGroup>
         <ToolbarDivider />
@@ -554,6 +683,17 @@ export function CommandBar({
             onClick={() => onSortSelectedRange('desc')}
             icon={ArrowDownAZ}
           />
+          {onToggleSortHeader && (
+            <HeaderCheck title="Keep first row pinned as header when sorting">
+              <input
+                type="checkbox"
+                aria-label="Sort with header row"
+                checked={sortHasHeader}
+                onChange={onToggleSortHeader}
+              />
+              Sort header
+            </HeaderCheck>
+          )}
           <ToolIconButton
             title="Filter selected column"
             aria-pressed={filterActive}
@@ -601,6 +741,18 @@ export function CommandBar({
             onClick={onToggleFirstColumnFreeze}
             icon={PanelLeft}
           />
+          {onFreezeToActiveCell && (
+            <ToolIconButton
+              title={
+                customFreezeActive
+                  ? 'Unfreeze panes'
+                  : 'Freeze up to active cell'
+              }
+              aria-pressed={customFreezeActive}
+              onClick={onFreezeToActiveCell}
+              icon={Snowflake}
+            />
+          )}
           <ToolIconButton
             title="Protect selected range"
             onClick={onLockSelectedRange}
@@ -747,6 +899,20 @@ export function CommandBar({
             onClick={() => onResizeRow(-8)}
             icon={Minimize2}
           />
+          {onAutoFitColumns && (
+            <ToolIconButton
+              title="Auto-fit column width"
+              onClick={onAutoFitColumns}
+              icon={MoveHorizontal}
+            />
+          )}
+          {onAutoFitRows && (
+            <ToolIconButton
+              title="Auto-fit row height"
+              onClick={onAutoFitRows}
+              icon={MoveVertical}
+            />
+          )}
         </ToolbarGroup>
       </ToolbarRow>
       <FindBox
@@ -766,11 +932,22 @@ export function CommandBar({
           value={findText}
           onChange={event => onFindTextChange(event.currentTarget.value)}
           onKeyDown={event => {
-            if (event.key === 'Enter') onFindNext()
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              if (event.shiftKey && onFindPrevious) onFindPrevious()
+              else onFindNext()
+            }
           }}
           placeholder="Find"
           aria-label="Find cells"
         />
+        {findText.trim() !== '' && (
+          <FindMatchCounter aria-live="polite" aria-label="Find match count">
+            {findMatchCount > 0 && findActiveIndex >= 0
+              ? `${findActiveIndex + 1} / ${findMatchCount}`
+              : `0 / ${findMatchCount}`}
+          </FindMatchCounter>
+        )}
         <FindInput
           value={replaceText}
           onChange={event => onReplaceTextChange(event.currentTarget.value)}
@@ -786,6 +963,13 @@ export function CommandBar({
           onClick={onToggleMatchCase}
           icon={CaseSensitive}
         />
+        {onFindPrevious && (
+          <ToolIconButton
+            title="Find previous"
+            onClick={onFindPrevious}
+            icon={ChevronUp}
+          />
+        )}
         <ToolIconButton title="Find next" onClick={onFindNext} icon={Search} />
         {/* Labeled text buttons: the replace actions were undiscoverable as
               look-alike icons (two identical "Replace" icons) (#277). */}
@@ -992,6 +1176,15 @@ const FindBox = styled.div`
 // Labelled toolbar controls for the replace actions — the icon-only versions
 // were undiscoverable (#277).
 const FindActionButton = styled(ToolTextButton)``
+
+const FindMatchCounter = styled.span`
+  padding: 0 6px;
+  color: var(--pure-chrome-muted);
+  font-family: var(--platform-typography-font-family-mono);
+  font-size: var(--pure-chrome-meta-size);
+  font-weight: 600;
+  white-space: nowrap;
+`
 
 // A toolbar-height outlined input (the 28px toolbar select's box).
 const FindInput = styled.input.attrs(selectChrome)`

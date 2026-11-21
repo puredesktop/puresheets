@@ -16,9 +16,16 @@ import {
   type PureSheetsUniverSnapshot,
 } from './univerAdapter'
 import {
+  clampFontSize,
+  isForbiddenKey,
+  isSafeCellKey,
+  isSafeRangeToken,
+  MAX_PERSISTED_ROWS,
+  MAX_SHEET_COLUMNS,
   normalizeComments,
   normalizeConditionalFormats,
   normalizeFilterQuery,
+  normalizeHexColor,
   normalizeProtection,
   normalizeValidations,
 } from './sheetMetadataNormalize'
@@ -72,7 +79,7 @@ export function isSheetsHtmlPath(path: string): boolean {
   return path.toLowerCase().endsWith('.sheets.html')
 }
 
-function validateDocument(input: unknown): PureSheetsDocument {
+export function validateDocument(input: unknown): PureSheetsDocument {
   if (!isRecord(input))
     throw new Error('PureSheets file must be a JSON object.')
   if (input.app !== 'PureSheets')
@@ -93,12 +100,20 @@ function validateDocument(input: unknown): PureSheetsDocument {
       : sheets[0].id
   const metadata = isRecord(input.metadata) ? input.metadata : {}
   const engine = isRecord(input.engine) ? input.engine : {}
+  const preservedSnapshotId =
+    isRecord(engine.snapshot) &&
+    typeof engine.snapshot.id === 'string' &&
+    engine.snapshot.id.trim() &&
+    !isForbiddenKey(engine.snapshot.id)
+      ? engine.snapshot.id
+      : undefined
   const fallbackDocument: PureSheetsDocument = {
     app: 'PureSheets',
     version: 1,
     engine: {
       name: 'univer',
       version: typeof engine.version === 'string' ? engine.version : undefined,
+      ...(preservedSnapshotId ? { snapshot: { id: preservedSnapshotId } } : {}),
     },
     metadata: {
       title: typeof metadata.title === 'string' ? metadata.title : 'Untitled',
@@ -140,13 +155,19 @@ function normalizeSheet(input: unknown): WorkbookSheet {
     typeof input.rowCount !== 'number' ||
     typeof input.columnCount !== 'number' ||
     !Number.isInteger(input.rowCount) ||
-    !Number.isInteger(input.columnCount)
+    !Number.isInteger(input.columnCount) ||
+    input.rowCount < 1 ||
+    input.columnCount < 1
   ) {
     throw new Error('Sheet dimensions are required.')
   }
   if (!isRecord(input.cells)) throw new Error('Sheet cells must be an object.')
-  const rowCount = input.rowCount
-  const columnCount = input.columnCount
+  const rowCount = Math.min(input.rowCount, MAX_PERSISTED_ROWS)
+  const columnCount = Math.min(input.columnCount, MAX_SHEET_COLUMNS)
+  const rawFrozenRows = optionalInteger(input.frozenRows)
+  const rawFrozenCols = optionalInteger(input.frozenColumns)
+  const rawFilterRow = optionalInteger(input.filterRow)
+  const rawFilterCol = optionalInteger(input.filterColumn)
   return {
     id: input.id,
     name: input.name,
@@ -155,11 +176,25 @@ function normalizeSheet(input: unknown): WorkbookSheet {
     cells: normalizeCells(input.cells),
     columnWidths: normalizeNumberRecord(input.columnWidths),
     rowHeights: normalizeNumberRecord(input.rowHeights),
-    frozenRows: optionalInteger(input.frozenRows),
-    frozenColumns: optionalInteger(input.frozenColumns),
+    frozenRows:
+      rawFrozenRows !== undefined
+        ? Math.min(rowCount, Math.max(0, rawFrozenRows))
+        : undefined,
+    frozenColumns:
+      rawFrozenCols !== undefined
+        ? Math.min(columnCount, Math.max(0, rawFrozenCols))
+        : undefined,
     merges: normalizeMerges(input.merges),
-    filterRow: optionalInteger(input.filterRow),
-    filterColumn: optionalInteger(input.filterColumn),
+    filterRow:
+      rawFilterRow !== undefined && rawFilterRow >= 0 && rawFilterRow < rowCount
+        ? rawFilterRow
+        : undefined,
+    filterColumn:
+      rawFilterCol !== undefined &&
+      rawFilterCol >= 0 &&
+      rawFilterCol < columnCount
+        ? rawFilterCol
+        : undefined,
     filterHasHeader:
       typeof input.filterHasHeader === 'boolean'
         ? input.filterHasHeader
@@ -177,23 +212,19 @@ function normalizeSheet(input: unknown): WorkbookSheet {
 function normalizeCells(
   input: Record<string, unknown>,
 ): Record<string, SheetCell> {
-  return Object.fromEntries(
-    Object.entries(input).flatMap(([key, value]) => {
-      if (!isRecord(value)) return []
-      if (typeof value.value !== 'string') return []
-      const kind = normalizeCellKind(value.kind)
-      return [
-        [
-          key,
-          {
-            value: value.value,
-            kind,
-            style: normalizeCellStyle(value.style),
-          },
-        ],
-      ]
-    }),
-  )
+  const cells: Record<string, SheetCell> = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (!isSafeCellKey(key)) continue
+    if (!isRecord(value)) continue
+    if (typeof value.value !== 'string') continue
+    const kind = normalizeCellKind(value.kind)
+    cells[key.trim().toUpperCase()] = {
+      value: value.value,
+      kind,
+      style: normalizeCellStyle(value.style),
+    }
+  }
+  return cells
 }
 
 function normalizeCellKind(value: unknown): CellValueKind {
@@ -212,11 +243,12 @@ function normalizeCellStyle(input: unknown): CellStyle | undefined {
   if (typeof input.italic === 'boolean') style.italic = input.italic
   if (typeof input.underline === 'boolean') style.underline = input.underline
   if (['wrap', 'clip', 'overflow'].includes(input.wrap as string)) style.wrap = input.wrap as CellStyle['wrap']
-  if (typeof input.fontSize === 'number' && Number.isFinite(input.fontSize)) {
-    style.fontSize = input.fontSize
-  }
-  if (typeof input.textColor === 'string') style.textColor = input.textColor
-  if (typeof input.fillColor === 'string') style.fillColor = input.fillColor
+  const fontSize = clampFontSize(input.fontSize)
+  if (fontSize !== undefined) style.fontSize = fontSize
+  const textColor = normalizeHexColor(input.textColor)
+  if (textColor) style.textColor = textColor
+  const fillColor = normalizeHexColor(input.fillColor)
+  if (fillColor) style.fillColor = fillColor
   // `border` was silently dropped here for legacy files without an embedded
   // engine snapshot (the snapshot path preserved it) — a legacy-load data
   // loss the round-trip baseline could not see. Keep it, and `decimals`.
@@ -261,7 +293,8 @@ function normalizeCellStyle(input: unknown): CellStyle | undefined {
 function normalizeMerges(input: unknown): string[] | undefined {
   if (!Array.isArray(input)) return undefined
   const merges = input.filter(
-    (merge): merge is string => typeof merge === 'string' && /^[A-Z]+[1-9]\d*:[A-Z]+[1-9]\d*$/i.test(merge),
+    (merge): merge is string =>
+      typeof merge === 'string' && merge.includes(':') && isSafeRangeToken(merge),
   )
   return merges.length ? merges : undefined
 }
@@ -270,12 +303,14 @@ function normalizeNumberRecord(
   input: unknown,
 ): Record<string, number> | undefined {
   if (!isRecord(input)) return undefined
-  const values = Object.fromEntries(
-    Object.entries(input).filter(
-      (entry): entry is [string, number] =>
-        typeof entry[1] === 'number' && Number.isFinite(entry[1]),
-    ),
-  )
+  const values: Record<string, number> = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (!/^(?:0|[1-9]\d*)$/.test(key)) continue
+    const idx = Number(key)
+    if (!Number.isSafeInteger(idx) || idx >= 1_048_576) continue
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) continue
+    values[key] = Math.min(2000, Math.max(1, value))
+  }
   return Object.keys(values).length ? values : undefined
 }
 
@@ -379,16 +414,20 @@ function normalizeAgentLog(input: unknown): AgentLogEntry[] | undefined {
           if (!isRecord(cell)) return []
           if (
             typeof cell.cell !== 'string' ||
+            !isSafeCellKey(cell.cell) ||
             typeof cell.after !== 'string' ||
-            typeof cell.kind !== 'string'
+            (cell.kind !== 'text' &&
+              cell.kind !== 'number' &&
+              cell.kind !== 'formula' &&
+              cell.kind !== 'blank')
           ) {
             return []
           }
           return [
             {
-              cell: cell.cell,
+              cell: cell.cell.trim().toUpperCase(),
               after: cell.after,
-              kind: cell.kind as AgentLogCellChange['kind'],
+              kind: cell.kind,
               ...(typeof cell.before === 'string'
                 ? { before: cell.before }
                 : {}),

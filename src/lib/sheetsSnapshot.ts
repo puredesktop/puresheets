@@ -1,4 +1,5 @@
-import type { PureSheetsDocument, SheetCell } from '../types'
+import type { PureSheetsDocument } from '../types'
+import { cellKey, displayCellValue } from './workbookModel'
 
 /**
  * A distilled snapshot of the workbook for the document switcher: the
@@ -10,14 +11,6 @@ const ROWS = 12
 const CELL_W = 110
 const CELL_H = 46
 const PAD = 8
-
-function cellAt(
-  cells: Record<string, SheetCell>,
-  column: number,
-  row: number,
-): SheetCell | undefined {
-  return cells[`${String.fromCharCode(65 + column)}${row + 1}`]
-}
 
 function escapeXml(value: string): string {
   return value
@@ -58,12 +51,14 @@ export function sheetsSnapshotHtml(
   }
   for (let row = 0; row < ROWS; row += 1) {
     for (let column = 0; column < COLS; column += 1) {
-      const cell = cellAt(cells, column, row)
-      const value = cell?.value?.trim()
+      const key = cellKey(row, column)
+      const cell = cells[key]
+      if (!cell) continue
+      const value = displayCellValue(sheet, key, document.workbook).trim()
       if (!value) continue
       const x = PAD + column * CELL_W + 8
       const y = PAD + row * CELL_H + CELL_H / 2 + 5
-      const numeric = cell?.kind === 'number' || /^-?[\d,.%$€£]+$/.test(value)
+      const numeric = cell.kind === 'number' || /^-?[\d,.%$€£]+$/.test(value)
       parts.push(
         `<text x="${numeric ? PAD + (column + 1) * CELL_W - 8 : x}" y="${y}" text-anchor="${numeric ? 'end' : 'start'}" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="${row === 0 ? 700 : 400}" fill="${row === 0 ? '#2b2933' : '#57545f'}">${escapeXml(value.slice(0, 12))}</text>`,
       )

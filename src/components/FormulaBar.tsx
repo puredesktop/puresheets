@@ -111,6 +111,7 @@ export function FormulaBar({
   onRangeInvalid,
   onEditValueChange,
   onCommitSelectedCell,
+  onCancelEdit,
 }: {
   selectedCell: string
   selectedRange: string
@@ -121,8 +122,12 @@ export function FormulaBar({
   onRangeInvalid: (message: string) => void
   onEditValueChange: (value: string) => void
   onCommitSelectedCell: (value: string) => void
+  onCancelEdit?: () => void
 }): React.ReactElement {
   const mirrorRef = useRef<HTMLDivElement | null>(null)
+  const skipNextBlurCommitRef = useRef(false)
+  const rangeBeforeFocusRef = useRef(selectedRange)
+  const skipNextRangeBlurRef = useRef(false)
   const [suggestionIndex, setSuggestionIndex] = useState(0)
   const [suppressSuggestions, setSuppressSuggestions] = useState(false)
   const [focused, setFocused] = useState(false)
@@ -163,8 +168,30 @@ export function FormulaBar({
       <CellReference aria-label="Name box">{selectedCell}</CellReference>
       <RangeInput
         value={selectedRange}
+        onFocus={() => {
+          rangeBeforeFocusRef.current = selectedRange
+        }}
         onChange={event => onRangeChange(event.currentTarget.value)}
+        onKeyDown={event => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            skipNextRangeBlurRef.current = true
+            const normalized = normalizeRangeToken(selectedRange)
+            if (normalized) onRangeChange(normalized)
+            else onRangeInvalid(`Invalid range ${selectedRange}`)
+            event.currentTarget.blur()
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            skipNextRangeBlurRef.current = true
+            onRangeChange(rangeBeforeFocusRef.current)
+            event.currentTarget.blur()
+          }
+        }}
         onBlur={() => {
+          if (skipNextRangeBlurRef.current) {
+            skipNextRangeBlurRef.current = false
+            return
+          }
           const normalized = normalizeRangeToken(selectedRange)
           if (normalized) onRangeChange(normalized)
           else onRangeInvalid(`Invalid range ${selectedRange}`)
@@ -194,7 +221,10 @@ export function FormulaBar({
           value={editValue}
           $mirrored={isFormula}
           onChange={event => handleChange(event.currentTarget.value)}
-          onFocus={() => setFocused(true)}
+          onFocus={() => {
+            skipNextBlurCommitRef.current = false
+            setFocused(true)
+          }}
           onScroll={event => {
             if (mirrorRef.current) {
               mirrorRef.current.scrollLeft = event.currentTarget.scrollLeft
@@ -202,6 +232,10 @@ export function FormulaBar({
           }}
           onBlur={() => {
             setFocused(false)
+            if (skipNextBlurCommitRef.current) {
+              skipNextBlurCommitRef.current = false
+              return
+            }
             onCommitSelectedCell(editValue)
           }}
           onKeyDown={event => {
@@ -232,7 +266,14 @@ export function FormulaBar({
               }
             }
             if (event.key === 'Enter') {
+              event.preventDefault()
+              skipNextBlurCommitRef.current = true
               onCommitSelectedCell(editValue)
+              event.currentTarget.blur()
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              skipNextBlurCommitRef.current = true
+              onCancelEdit?.()
               event.currentTarget.blur()
             }
           }}
