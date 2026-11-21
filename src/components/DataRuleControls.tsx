@@ -1,10 +1,40 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
 import { PaintBucket, ShieldCheck } from 'lucide-react'
 import { PlatformIcon } from '@purescience/platform-ui/components/chrome/PlatformIcon'
 import { IconButton } from './controls'
 import type { CellStyle, ConditionalFormatRule } from '../types'
+
+function useDismissOnOutsideOrEscape(
+  open: boolean,
+  ref: React.RefObject<HTMLElement | null>,
+  onClose: () => void,
+): void {
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        onCloseRef.current()
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        onCloseRef.current()
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, ref])
+}
 
 /**
  * Compact popover controls for the Phase S3 data rules: data validation and
@@ -24,6 +54,8 @@ export function ValidationControl({
   onClear: () => void
 }): React.ReactElement {
   const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  useDismissOnOutsideOrEscape(open, wrapRef, () => setOpen(false))
   const [kind, setKind] = useState<ValidationKind>('list')
   const [minText, setMinText] = useState('')
   const [maxText, setMaxText] = useState('')
@@ -39,7 +71,7 @@ export function ValidationControl({
   }
 
   return (
-    <ControlWrap>
+    <ControlWrap ref={wrapRef}>
       <IconButton
         type="button"
         title="Data validation"
@@ -152,6 +184,8 @@ export function ConditionalFormatControl({
   onClear: () => void
 }): React.ReactElement {
   const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  useDismissOnOutsideOrEscape(open, wrapRef, () => setOpen(false))
   const [kind, setKind] = useState<ConditionKind>('greater')
   const [value, setValue] = useState('')
   const [value2, setValue2] = useState('')
@@ -181,7 +215,7 @@ export function ConditionalFormatControl({
   }
 
   return (
-    <ControlWrap>
+    <ControlWrap ref={wrapRef}>
       <IconButton
         type="button"
         title="Conditional formatting"

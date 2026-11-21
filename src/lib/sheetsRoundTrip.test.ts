@@ -479,12 +479,17 @@ describe('Phase S0 hard gate: .sheets round-trip through the Univer bridge', () 
       'A3:A5',
     ])
 
-    // Delete the inserted column again and round-trip: references come back,
-    // nothing else moved. (Counts never shrink below the rendered-canvas
+    // Deleting a column that intersects a locked range (A1:E1) is refused
+    // while protection is active, even when the column itself is empty.
+    expect(deleteColumn(dataAfterWiden, 1)).toBe(dataAfterWiden)
+
+    // Unlock and delete the inserted column again and round-trip: references
+    // come back, nothing else moved. (Counts never shrink below the rendered-canvas
     // floor — that floor is rendering minimum, not data.)
+    const unlockedForDelete = { ...dataAfterWiden, protection: undefined }
     const deleted = cloneWithUpdatedSheet(
       reloadedWiden,
-      deleteColumn(dataAfterWiden, 1),
+      deleteColumn(unlockedForDelete, 1),
     )
     const reloadedDelete = loadSheetsDocument(serializeSheetsDocument(deleted))
     const dataAfterDelete = sheetById(reloadedDelete, 'data')
@@ -505,7 +510,7 @@ describe('Phase S0 hard gate: .sheets round-trip through the Univer bridge', () 
       B3: 'Confirmed with regional lead',
       D1: 'Data source unavailable this quarter',
     })
-    expect(dataAfterDelete.protection).toEqual({ lockedRanges: ['A1:D1'] })
+    expect(dataAfterDelete.protection).toBeUndefined()
     expect(dataAfterDelete.validations?.map(rule => rule.range)).toEqual([
       'B3:B5',
       'A3:A5',

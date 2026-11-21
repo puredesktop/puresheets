@@ -7,9 +7,11 @@ import {
   createBlankSheet,
   createBlankWorkbook,
   parseCellKey,
+  renameSheetReferences,
 } from './workbookModel'
 import { withFreshUniverSnapshot } from './univerAdapter'
 import { patternOfStyle, styleFromPattern } from './numberFormats'
+import { normalizeHexColor } from './sheetMetadataNormalize'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
 import type {
   CellStyle,
@@ -177,15 +179,171 @@ export async function importXlsxWorkbook(
   return { document, warnings }
 }
 
+class XlsxSecurityError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'XlsxSecurityError'
+  }
+}
+
+const MAX_ZIP_ENTRIES = 2_000
+const MAX_UNCOMPRESSED_ARCHIVE_BYTES = 100_000_000
+
+/**
+ * Pre-flight ZIP central-directory & streaming decompression guard.
+ * Rejects zip bombs (excessive entry counts or declared/actual uncompressed
+ * sizes across ALL archive entries) BEFORE exceljs loads the workbook.
+ */
+async function assertSafeXlsxArchive(bytes: Uint8Array): Promise<void> {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const floor = Math.max(0, bytes.length - 65_557)
+  let eocd = -1
+  for (let offset = bytes.length - 22; offset >= floor; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) {
+      eocd = offset
+      break
+    }
+  }
+  if (eocd >= 0) {
+    const declaredCount = view.getUint16(eocd + 10, true)
+    if (declaredCount > MAX_ZIP_ENTRIES) {
+      throw new XlsxSecurityError(
+        'This Excel file has too many archive entries to open safely.',
+      )
+    }
+    let cdOffset = view.getUint32(eocd + 16, true)
+    let declaredUncompressed = 0
+    let seenEntries = 0
+    while (cdOffset + 46 <= bytes.length) {
+      if (view.getUint32(cdOffset, true) !== 0x02014b50) break
+      seenEntries += 1
+      if (seenEntries > MAX_ZIP_ENTRIES) {
+        throw new XlsxSecurityError(
+          'This Excel file has too many archive entries to open safely.',
+        )
+      }
+      const uncompressedSize = view.getUint32(cdOffset + 24, true)
+      if (uncompressedSize !== 0xffffffff) {
+        declaredUncompressed += uncompressedSize
+        if (declaredUncompressed > MAX_UNCOMPRESSED_ARCHIVE_BYTES) {
+          throw new XlsxSecurityError(
+            'This Excel file exceeds the maximum safe decompressed archive size.',
+          )
+        }
+      }
+      const nameLength = view.getUint16(cdOffset + 28, true)
+      const extraLength = view.getUint16(cdOffset + 30, true)
+      const commentLength = view.getUint16(cdOffset + 32, true)
+      cdOffset += 46 + nameLength + extraLength + commentLength
+    }
+  }
+
+  let zip: JSZip
+  try {
+    zip = await JSZip.loadAsync(bytes)
+  } catch {
+    // Let exceljs produce the standard malformed-file error for non-ZIP inputs.
+    return
+  }
+  const entries = Object.values(zip.files)
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    throw new XlsxSecurityError(
+      'This Excel file has too many archive entries to open safely.',
+    )
+  }
+  // Check actual decompressed byte totals across all entries using streaming
+  // chunks so a forged central-directory size cannot exhaust memory.
+  let totalDecompressed = 0
+  for (const entry of entries) {
+    if (entry.dir) continue
+    const rawMeta = (entry as unknown as { _data?: { uncompressedSize?: number } })._data
+    if (
+      typeof rawMeta?.uncompressedSize === 'number' &&
+      rawMeta.uncompressedSize > MAX_UNCOMPRESSED_ARCHIVE_BYTES
+    ) {
+      throw new XlsxSecurityError(
+        'This Excel file exceeds the maximum safe decompressed archive size.',
+      )
+    }
+    const streamFactory = (
+      entry as unknown as {
+        internalStream?: (type: 'uint8array') => {
+          on: (event: string, cb: (arg: unknown) => void) => void
+          pause: () => void
+          resume: () => void
+        }
+      }
+    ).internalStream
+    if (typeof streamFactory === 'function') {
+      await new Promise<void>((resolve, reject) => {
+        const stream = streamFactory.call(entry, 'uint8array')
+        let settled = false
+        const fail = (err: unknown): void => {
+          if (settled) return
+          settled = true
+          try {
+            stream.pause()
+          } catch {
+            // ignore
+          }
+          reject(err)
+        }
+        stream.on('data', (chunk: unknown) => {
+          const byteLength = chunk instanceof Uint8Array ? chunk.byteLength : 0
+          totalDecompressed += byteLength
+          if (totalDecompressed > MAX_UNCOMPRESSED_ARCHIVE_BYTES) {
+            fail(
+              new XlsxSecurityError(
+                'This Excel file exceeds the maximum safe decompressed archive size.',
+              ),
+            )
+          }
+        })
+        stream.on('error', (err: unknown) => {
+          // Non-security stream parse errors are left for exceljs to diagnose.
+          if (err instanceof XlsxSecurityError) fail(err)
+          else if (!settled) {
+            settled = true
+            resolve()
+          }
+        })
+        stream.on('end', () => {
+          if (!settled) {
+            settled = true
+            resolve()
+          }
+        })
+        stream.resume()
+      })
+    } else {
+      const content = await entry.async('uint8array')
+      totalDecompressed += content.byteLength
+      if (totalDecompressed > MAX_UNCOMPRESSED_ARCHIVE_BYTES) {
+        throw new XlsxSecurityError(
+          'This Excel file exceeds the maximum safe decompressed archive size.',
+        )
+      }
+    }
+  }
+}
+
 async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
+  await assertSafeXlsxArchive(bytes)
   const workbook = new ExcelJS.Workbook()
   try {
     await workbook.xlsx.load(bytes.slice().buffer as ArrayBuffer)
     return workbook
   } catch (firstError) {
+    if (firstError instanceof XlsxSecurityError) throw firstError
     // Files written by .NET tools prefix every element (<x:workbook>) and point at parts by absolute path,
     // neither of which exceljs reads.
-    const unprefixed = await normalizedForExcelJs(bytes).catch(() => null)
+    let unprefixed: ArrayBuffer | null = null
+    try {
+      unprefixed = await normalizedForExcelJs(bytes)
+    } catch (normError) {
+      if (normError instanceof XlsxSecurityError) throw normError
+      unprefixed = null
+    }
     if (unprefixed) {
       const retry = new ExcelJS.Workbook()
       try {
@@ -209,24 +367,38 @@ const UNPREFIXED_NAMESPACES = [
   'http://schemas.openxmlformats.org/package/2006/content-types',
 ]
 
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 /**
  * Rewrite each XML part so the main spreadsheet namespace is the default one
  * (`<x:sheet>` → `<sheet>`), and each relationship target relative to its part
  * (`/xl/styles.xml` → `styles.xml`). Returns null when nothing needed it.
  */
 export async function normalizedForExcelJs(bytes: Uint8Array): Promise<ArrayBuffer | null> {
+  await assertSafeXlsxArchive(bytes)
   const zip = await JSZip.loadAsync(bytes)
+  const entries = Object.values(zip.files)
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    throw new XlsxSecurityError('This Excel file has too many archive entries to open safely.')
+  }
+  let totalBytes = 0
   let changed = false
-  for (const entry of Object.values(zip.files)) {
+  for (const entry of entries) {
     if (entry.dir || !/\.(xml|rels)$/i.test(entry.name)) continue
     const xml = await entry.async('string')
+    totalBytes += xml.length * 2
+    if (totalBytes > MAX_UNCOMPRESSED_ARCHIVE_BYTES) {
+      throw new XlsxSecurityError('This Excel file exceeds the maximum safe decompressed archive size.')
+    }
     let next = xml
     for (const namespace of UNPREFIXED_NAMESPACES) {
       const declared = new RegExp(`xmlns:([A-Za-z_][\\w.-]*)="${namespace.replace(/[.]/g, '\\.')}"`).exec(next)
       if (!declared) continue
-      const prefix = declared[1]
+      const escapedPrefix = escapeRegExp(declared[1])
       next = next
-        .replace(new RegExp(`<(/?)${prefix}:`, 'g'), '<$1')
+        .replace(new RegExp(`<(/?)${escapedPrefix}:`, 'g'), '<$1')
         .replace(declared[0], /\sxmlns="/.test(next) ? '' : `xmlns="${namespace}"`)
     }
     const relsOf = /^(.*?)_rels\/[^/]+\.rels$/.exec(entry.name)
@@ -317,9 +489,19 @@ function mapXlsxCell(
       if (objectValue.shareType === 'array')
         losses.add('array formulas (came in as ordinary formulas)')
     } else if (objectValue.sharedFormula) {
-      const master = worksheet.getCell(objectValue.sharedFormula)
-      const masterFormula = (master.value as { formula?: string } | null)?.formula
-      if (masterFormula) {
+      let master: ExcelJS.Cell | null = null
+      if (
+        typeof objectValue.sharedFormula === 'string' &&
+        parseCellKey(objectValue.sharedFormula)
+      ) {
+        try {
+          master = worksheet.getCell(objectValue.sharedFormula)
+        } catch {
+          master = null
+        }
+      }
+      const masterFormula = (master?.value as { formula?: string } | null)?.formula
+      if (master && masterFormula) {
         value = `=${formulaFromExcel(
           translateSharedFormula(
             masterFormula,
@@ -776,27 +958,6 @@ export function excelSheetNames(names: string[]): Map<string, string> {
   return result
 }
 
-/** Point sheet-qualified references (Costs!A1, 'Q1/Q2'!A1) at the sheet's Excel name. */
-function renameSheetReferences(formula: string, names: Map<string, string>): string {
-  const renamed = new Map(
-    [...names].filter(([from, to]) => from !== to).map(([from, to]) => [from.toLowerCase(), to]),
-  )
-  if (!renamed.size) return formula
-  const quote = (name: string) => (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`)
-  return formula
-    .split(/("(?:[^"]|"")*")/)
-    .map((part, index) =>
-      index % 2 === 1
-        ? part
-        : part.replace(/'((?:[^']|'')+)'!|(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.]*)!/g, (whole, quoted?: string, bare?: string) => {
-            const name = quoted !== undefined ? quoted.replace(/''/g, "'") : bare ?? ''
-            const target = renamed.get(name.toLowerCase())
-            return target ? `${quote(target)}!` : whole
-          }),
-    )
-    .join('')
-}
-
 function excelValue(
   sheet: WorkbookSheet,
   key: string,
@@ -843,10 +1004,12 @@ function applyStyleToExcelCell(excelCell: ExcelJS.Cell, style: CellStyle | undef
   if (style.italic) font.italic = true
   if (style.underline) font.underline = true
   if (style.fontSize) font.size = style.fontSize
-  if (style.textColor) font.color = { argb: hexToArgb(style.textColor) }
+  const textArgb = style.textColor ? hexToArgb(style.textColor) : undefined
+  if (textArgb) font.color = { argb: textArgb }
   if (Object.keys(font).length) excelCell.font = font as ExcelJS.Font
-  if (style.fillColor) {
-    excelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hexToArgb(style.fillColor) } }
+  const fillArgb = style.fillColor ? hexToArgb(style.fillColor) : undefined
+  if (fillArgb) {
+    excelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fillArgb } }
   }
   const sides = style.border ? (['top', 'right', 'bottom', 'left'] as const) : style.borderSides ?? []
   if (sides.length) {
@@ -864,8 +1027,9 @@ function applyStyleToExcelCell(excelCell: ExcelJS.Cell, style: CellStyle | undef
     excelCell.numFmt = pattern
 }
 
-function hexToArgb(hex: string): string {
-  return `FF${hex.replace('#', '').toUpperCase()}`
+function hexToArgb(hex: string): string | undefined {
+  const normalized = normalizeHexColor(hex)
+  return normalized ? `FF${normalized.slice(1).toUpperCase()}` : undefined
 }
 
 function clamp(value: number, min: number, max: number): number {

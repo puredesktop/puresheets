@@ -1,7 +1,7 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
-import { Copy, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
 import { PlatformIcon } from '@purescience/platform-ui/components/chrome/PlatformIcon'
 import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
 import { IconButton, ToolIconButton } from './controls'
@@ -9,9 +9,9 @@ import type { WorkbookSheet } from '../types'
 import { sheetAgentRefs } from '../agentRefs'
 
 /**
- * Bottom bar: sheet tabs (add, select, rename inline) plus sheet actions and
- * the status line. Legacy agent-draft sheets are hidden here on purpose —
- * they are not user sheets.
+ * Bottom bar: sheet tabs (add, select, rename inline, reorder) plus sheet
+ * actions and the status line. Legacy agent-draft sheets are hidden here on
+ * purpose — they are not user sheets.
  */
 export function SheetTabsBar({
   compact = false,
@@ -26,6 +26,7 @@ export function SheetTabsBar({
   onBeginRenameSheet,
   onDuplicateSheet,
   onDeleteSheet,
+  onMoveSheet,
   onRenameDraftChange,
   onCommitSheetRename,
   onCancelSheetRename,
@@ -44,15 +45,26 @@ export function SheetTabsBar({
   onBeginRenameSheet: (sheetId: string) => void
   onDuplicateSheet: () => void
   onDeleteSheet: () => void
+  onMoveSheet?: (direction: 'left' | 'right') => void
   onRenameDraftChange: (value: string) => void
   onCommitSheetRename: () => void
   onCancelSheetRename: () => void
 }): React.ReactElement {
   const renameHandled = useRef(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  useEffect(() => {
+    setConfirmingDelete(false)
+  }, [activeSheetId, sheets.length])
+  const activeIndex = sheets.findIndex(sheet => sheet.id === activeSheetId)
+  const activeSheet = sheets[activeIndex]
+  const canDelete = sheets.length > 1
+  const canMoveLeft = activeIndex > 0
+  const canMoveRight = activeIndex >= 0 && activeIndex < sheets.length - 1
   return (
     <BottomBar $compact={compact}>
       <SheetTabs aria-label="Sheet tabs">
         <AddSheetButton
+          type="button"
           title="Add sheet"
           aria-label="Add sheet"
           onClick={onAddSheet}
@@ -63,6 +75,7 @@ export function SheetTabsBar({
           <SheetTab
             key={sheet.id}
             as={renamingSheetId === sheet.id ? 'div' : 'button'}
+            type={renamingSheetId === sheet.id ? undefined : 'button'}
             {...sheetAgentRefs(sheet)}
             $active={sheet.id === activeSheetId}
             aria-current={sheet.id === activeSheetId ? 'true' : undefined}
@@ -104,6 +117,22 @@ export function SheetTabsBar({
         ))}
         {!compact && (
           <>
+            {onMoveSheet && (
+              <>
+                <ToolIconButton
+                  title="Move sheet left"
+                  disabled={!canMoveLeft}
+                  onClick={() => onMoveSheet('left')}
+                  icon={ChevronLeft}
+                />
+                <ToolIconButton
+                  title="Move sheet right"
+                  disabled={!canMoveRight}
+                  onClick={() => onMoveSheet('right')}
+                  icon={ChevronRight}
+                />
+              </>
+            )}
             <ToolIconButton
               title="Rename sheet"
               onClick={onRenameSheet}
@@ -114,11 +143,46 @@ export function SheetTabsBar({
               onClick={onDuplicateSheet}
               icon={Copy}
             />
-            <ToolIconButton
-              title="Delete sheet"
-              onClick={onDeleteSheet}
-              icon={Trash2}
-            />
+            {confirmingDelete && canDelete ? (
+              <DeleteConfirm
+                role="group"
+                aria-label="Confirm delete sheet"
+                onKeyDown={event => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    setConfirmingDelete(false)
+                  }
+                }}
+              >
+                <DeleteConfirmLabel>
+                  Delete “{activeSheet?.name ?? 'sheet'}”?
+                </DeleteConfirmLabel>
+                <ConfirmDangerButton
+                  type="button"
+                  onClick={() => {
+                    setConfirmingDelete(false)
+                    onDeleteSheet()
+                  }}
+                >
+                  Confirm
+                </ConfirmDangerButton>
+                <ConfirmCancelButton
+                  type="button"
+                  onClick={() => setConfirmingDelete(false)}
+                >
+                  Cancel
+                </ConfirmCancelButton>
+              </DeleteConfirm>
+            ) : (
+              <ToolIconButton
+                title="Delete sheet"
+                disabled={!canDelete}
+                onClick={() => {
+                  if (canDelete) setConfirmingDelete(true)
+                }}
+                icon={Trash2}
+              />
+            )}
           </>
         )}
       </SheetTabs>
@@ -193,6 +257,46 @@ const SheetRenameInput = styled.input`
 
 const AddSheetButton = styled(IconButton)`
   flex: 0 0 auto;
+`
+
+const DeleteConfirm = styled.div`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  height: 30px;
+  border: 1px solid var(--platform-colors-danger-border, #e3a29b);
+  background: var(--pure-chrome-surface);
+  white-space: nowrap;
+  flex-shrink: 0;
+`
+
+const DeleteConfirmLabel = styled.span`
+  color: var(--sheets-ink);
+  font-size: 12px;
+  font-weight: 500;
+`
+
+const ConfirmDangerButton = styled.button`
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  background: var(--platform-colors-danger-text, #b3261e);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+`
+
+const ConfirmCancelButton = styled.button`
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--pure-chrome-line);
+  background: transparent;
+  color: var(--sheets-ink);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
 `
 
 /* Family status-line convention: meta, 11px mono in the muted colour. */

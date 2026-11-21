@@ -431,7 +431,9 @@ describe('PureSheetsShell file safety', () => {
       await flushAsync()
     })
     expect(lastSurface().revision).toBe(initialRevision + 2)
-    expect(lastSurface().snapshot.id).toBe(id)
+    // Each newly created workbook owns a distinct unit ID so selection/scroll
+    // never leaks across workbooks that happen to share the default title.
+    expect(lastSurface().snapshot.id).not.toBe(id)
     expect(lastSurface().snapshot.sheets['sheet-1'].cellData).toEqual({})
   })
 

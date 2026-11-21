@@ -4,5 +4,5 @@ import type { PureSheetsUniverSnapshot } from './univerAdapter'
 export function requestedSheetId(snapshot: PureSheetsUniverSnapshot): string | null {
   const custom = snapshot.custom as { puresheets?: { activeSheetId?: unknown } } | undefined
   const id = custom?.puresheets?.activeSheetId
-  return typeof id === 'string' && snapshot.sheets[id] ? id : null
+  return typeof id === 'string' && snapshot.sheets && Object.hasOwn(snapshot.sheets, id) ? id : null
 }

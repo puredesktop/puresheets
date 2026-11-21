@@ -4,7 +4,7 @@ import styled from 'styled-components'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-conditional-formatting/lib/index.css'
 import { CELL_BORDER_COLOR } from '../constants'
-import { cellKey, cellsInRange, parseCellKey } from '../lib/workbookModel'
+import { cellKey, cellsInRange, columnLabel, parseCellKey } from '../lib/workbookModel'
 import { normalizeConditionalFormats } from '../lib/sheetMetadataNormalize'
 import { requestedSheetId } from '../lib/workbookView'
 import type { InvalidCellFlag } from '../lib/sheetDataFeatures'
@@ -31,6 +31,7 @@ import type {
 const REACT_OWNED_SHEET_METADATA = [
   'filterRow',
   'filterColumn',
+  'filterHasHeader',
   'filterQuery',
   'comments',
   'validations',
@@ -182,7 +183,7 @@ export function UniverSpreadsheetSurface({
 
     async function mountUniver(): Promise<void> {
       const [
-        { LocaleType, ThemeService, Univer, UniverInstanceType },
+        { LocaleType, ThemeService, Univer, UniverInstanceType, WrapStrategy },
         { UniverSheetsCorePreset },
         { UniverSheetsConditionalFormattingPreset },
         { FUniver },
@@ -622,6 +623,23 @@ export function UniverSpreadsheetSurface({
         if (!worksheet || !edit(worksheet)) return false
         return exportSnapshotAfterBridgeEdit(worksheet)
       }
+      const coercePasteValue = (value: string): UniverPasteValue => {
+        const trimmed = value.trim()
+        if (trimmed.startsWith('=')) return { f: value }
+        if (
+          trimmed !== '' &&
+          /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)
+        ) {
+          const numeric = Number(trimmed)
+          if (
+            Number.isFinite(numeric) &&
+            (!Number.isInteger(numeric) || Number.isSafeInteger(numeric))
+          ) {
+            return numeric
+          }
+        }
+        return value
+      }
       const parsePasteMatrix = (text: string): UniverPasteValue[][] =>
         text
           .split(/\r?\n/)
@@ -629,13 +647,7 @@ export function UniverSpreadsheetSurface({
             (rowText, index, rows) =>
               rowText.length > 0 || index < rows.length - 1,
           )
-          .map(rowText =>
-            rowText
-              .split('\t')
-              .map(value =>
-                value.trim().startsWith('=') ? { f: value } : value,
-              ),
-          )
+          .map(rowText => rowText.split('\t').map(coercePasteValue))
       const syncSelectionFromUniver = (
         worksheet = univerApi.getActiveWorkbook?.()?.getActiveSheet?.() ?? null,
         selections?: Array<{
@@ -720,6 +732,14 @@ export function UniverSpreadsheetSurface({
           const worksheet = workbook?.getActiveSheet?.() ?? null
           const range = worksheet?.getRange?.(rangeToken)
           if (!worksheet || !range) return false
+          // Clearing colors (explicit `undefined`) falls back to model + reload
+          // so Univer drops background/font overrides cleanly in dark & light mode.
+          if (
+            ('textColor' in patch && patch.textColor === undefined) ||
+            ('fillColor' in patch && patch.fillColor === undefined)
+          ) {
+            return false
+          }
           preserveNextCommandRangeSync = true
           if (patch.bold !== undefined)
             range.setFontWeight?.(patch.bold ? 'bold' : 'normal')
@@ -736,6 +756,25 @@ export function UniverSpreadsheetSurface({
             range.setHorizontalAlignment?.(
               facadeHorizontalAlignment(patch.align),
             )
+          if (patch.verticalAlign !== undefined) {
+            if (!range.setVerticalAlignment) return false
+            range.setVerticalAlignment(patch.verticalAlign)
+          }
+          if (patch.wrap !== undefined) {
+            if (range.setWrapStrategy && WrapStrategy) {
+              range.setWrapStrategy(
+                patch.wrap === 'wrap'
+                  ? WrapStrategy.WRAP
+                  : patch.wrap === 'clip'
+                  ? WrapStrategy.CLIP
+                  : WrapStrategy.OVERFLOW,
+              )
+            } else if (range.setWrap) {
+              range.setWrap(patch.wrap === 'wrap')
+            } else {
+              return false
+            }
+          }
           if (patch.numberFormat !== undefined)
             range.setNumberFormat?.(
               numberFormatPatternForUniver(patch.numberFormat, patch.decimals),
@@ -933,7 +972,50 @@ export function UniverSpreadsheetSurface({
           const workbook = univerApi.getActiveWorkbook?.() ?? null
           const worksheet = workbook?.getSheetBySheetId?.(sheetId)
           if (!workbook || !worksheet?.autoFitRow) return false
-          for (const row of rows) worksheet.autoFitRow(row)
+          const snapSheet = lastSnapshotRef.current?.sheets?.[sheetId]
+          let maxPopulatedCol = -1
+          const cellData = snapSheet?.cellData
+          if (cellData && typeof cellData === 'object') {
+            for (const rowMap of Object.values(cellData)) {
+              if (!rowMap || typeof rowMap !== 'object') continue
+              for (const colKey of Object.keys(rowMap)) {
+                const colIdx = Number(colKey)
+                if (Number.isInteger(colIdx) && colIdx > maxPopulatedCol) {
+                  maxPopulatedCol = colIdx
+                }
+              }
+            }
+          }
+          const maxCols = Math.max(
+            1,
+            worksheet.getMaxColumns?.() ?? snapSheet?.columnCount ?? 26,
+          )
+          const wrapCols = Math.min(
+            maxCols,
+            Math.min(200, Math.max(10, maxPopulatedCol + 1)),
+          )
+          const lastCol = columnLabel(wrapCols - 1)
+          for (const row of rows) {
+            try {
+              const rowRange = worksheet.getRange?.(`A${row + 1}:${lastCol}${row + 1}`)
+              if (rowRange?.setWrapStrategy && WrapStrategy) {
+                rowRange.setWrapStrategy(WrapStrategy.WRAP)
+              } else {
+                rowRange?.setWrap?.(true)
+              }
+            } catch {
+              // Best-effort wrap before autoFitRow
+            }
+            worksheet.autoFitRow(row)
+          }
+          return exportWorkbookAfterBridgeEdit(workbook, true)
+        },
+        autoFitColumns: async (sheetId, columns) => {
+          if (disposed) return false
+          const workbook = univerApi.getActiveWorkbook?.() ?? null
+          const worksheet = workbook?.getSheetBySheetId?.(sheetId)
+          if (!workbook || !worksheet?.autoResizeColumn) return false
+          for (const col of columns) worksheet.autoResizeColumn(col)
           return exportWorkbookAfterBridgeEdit(workbook, true)
         },
         isCellEditing: () =>
@@ -1014,8 +1096,12 @@ export function UniverSpreadsheetSurface({
           const range = worksheet?.getRange?.(cell)
           if (!worksheet || !range) return false
           preserveNextCommandRangeSync = true
-          if (value.trim().startsWith('=')) range.setFormula?.(value)
-          else range.setValue?.(value)
+          const coerced = coercePasteValue(value)
+          if (typeof coerced === 'object' && coerced !== null && 'f' in coerced) {
+            range.setFormula?.(coerced.f)
+          } else {
+            range.setValue?.(coerced as string | number | boolean)
+          }
           return exportSnapshotAfterBridgeEdit(worksheet)
         },
       })

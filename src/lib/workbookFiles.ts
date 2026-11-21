@@ -142,3 +142,47 @@ export function workbookFilesForSave(
     },
   ]
 }
+
+/** Reject NUL bytes, encoded/raw parent-directory traversal segments, and optional relative paths. */
+export function validateSafeFilePath(
+  path: string,
+  options: { requireAbsolute?: boolean } = {},
+): string {
+  const trimmed = path.trim()
+  if (!trimmed) throw new Error('A file path is required.')
+  if (trimmed.includes('\0') || /%00/i.test(trimmed)) {
+    throw new Error('File path contains an invalid NUL byte.')
+  }
+  const hasTraversalSegment = (candidate: string): boolean =>
+    candidate.split(/[\\/]/).some(segment => segment === '..')
+  if (
+    hasTraversalSegment(trimmed) ||
+    /(?:^|[\\/])(?:%2e|\.)(?:%2e|\.)(?:$|[\\/])/i.test(trimmed)
+  ) {
+    throw new Error('File path must not contain ".." traversal segments.')
+  }
+  try {
+    const decoded = decodeURIComponent(trimmed)
+    if (decoded.includes('\0')) {
+      throw new Error('File path contains an invalid NUL byte.')
+    }
+    if (hasTraversalSegment(decoded)) {
+      throw new Error('File path must not contain ".." traversal segments.')
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('File path ')) {
+      throw error
+    }
+  }
+  if (
+    options.requireAbsolute &&
+    !(
+      trimmed.startsWith('/') ||
+      /^[A-Za-z]:[\\/]/.test(trimmed) ||
+      trimmed.startsWith('\\\\')
+    )
+  ) {
+    throw new Error('An absolute file path is required.')
+  }
+  return trimmed
+}

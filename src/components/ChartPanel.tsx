@@ -184,6 +184,13 @@ function ChartEditorForm({
   const [xLabelDraft, setXLabelDraft] = useState(chart.xLabel ?? '')
   const [yLabelDraft, setYLabelDraft] = useState(chart.yLabel ?? '')
 
+  useEffect(() => {
+    setTitleDraft(chart.title)
+    setRangeDraft(chart.range)
+    setXLabelDraft(chart.xLabel ?? '')
+    setYLabelDraft(chart.yLabel ?? '')
+  }, [chart.id, chart.title, chart.range, chart.xLabel, chart.yLabel])
+
   const legend = chart.legend ?? (isRadial(chart.type) ? 'right' : 'none')
 
   function applyEdits(): void {
@@ -387,13 +394,20 @@ export function MiniChart({
   if (chart.type === 'scatter') {
     return <ScatterChart chart={chart} width={width} height={height} />
   }
-  const max = Math.max(...chart.values, 1)
+  const minValue = Math.min(...chart.values, 0)
+  const maxValue = Math.max(...chart.values, 0)
+  const span = Math.max(maxValue - minValue, 1e-9)
+  const plotBottom = height - 16
+  const plotHeight = height - 28
+  const yForValue = (value: number): number =>
+    plotBottom - ((value - minValue) / span) * plotHeight
+  const zeroY = yForValue(0)
   const points = chart.values.map((value, index) => {
     const x =
       chart.values.length <= 1
         ? width / 2
         : 18 + (index / (chart.values.length - 1)) * (width - 36)
-    const y = height - 16 - (value / max) * (height - 28)
+    const y = yForValue(value)
     return { x, y, value, label: chart.labels[index] ?? `${index + 1}` }
   })
   const showAxisText = chart.showAxes !== false
@@ -405,13 +419,23 @@ export function MiniChart({
         role="img"
         aria-label={chart.title}
       >
+        {minValue < 0 && (
+          <line
+            x1={12}
+            y1={zeroY}
+            x2={width - 12}
+            y2={zeroY}
+            stroke="#c7cfc0"
+            strokeDasharray="3 2"
+          />
+        )}
         {chart.type === 'area' && points.length > 1 && (
           <polygon
             fill="#377d5a"
             opacity="0.18"
-            points={`${points[0].x},${height - 16} ${linePoints} ${
+            points={`${points[0].x},${zeroY} ${linePoints} ${
               points[points.length - 1].x
-            },${height - 16}`}
+            },${zeroY}`}
           />
         )}
         <polyline
@@ -444,21 +468,28 @@ export function MiniChart({
       role="img"
       aria-label={chart.title}
     >
+      {minValue < 0 && (
+        <line
+          x1={12}
+          y1={zeroY}
+          x2={width - 12}
+          y2={zeroY}
+          stroke="#c7cfc0"
+          strokeDasharray="3 2"
+        />
+      )}
       {points.map(point => {
-        // Measure the bar from the same baseline the point `y` uses
-        // (height - 16); the old `height - 18` was 2px lower, so tiny/zero
-        // bars produced a slightly negative height and an invalid <rect>.
-        // Clamp keeps negative data values from re-introducing it.
-        const barHeight = Math.max(0, height - 16 - point.y)
+        const rectY = point.value >= 0 ? point.y : zeroY
+        const barHeight = Math.max(0, Math.abs(zeroY - point.y))
         return (
           <g key={`${point.label}-${point.x}`}>
             <rect
               x={point.x - barWidth / 2}
-              y={point.y}
+              y={rectY}
               width={barWidth}
               height={barHeight}
               rx="3"
-              fill="#377d5a"
+              fill={point.value >= 0 ? '#377d5a' : '#a8385a'}
             />
             {showAxisText && (
               <text x={point.x} y={height - 2} textAnchor="middle">
