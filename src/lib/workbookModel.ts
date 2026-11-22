@@ -1,5 +1,8 @@
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
 import { MAX_SHEET_COLUMNS, MAX_SHEET_ROWS } from './sheetMetadataNormalize'
+import { extractChartData } from './chartEngine'
+import { resolveNamedRangesInFormula } from './formulaCatalog'
+import { visibleRowsWithFilters } from './dataTransforms'
 import type {
   AgentCellChange,
   AgentLogCellChange,
@@ -1800,6 +1803,12 @@ export function visibleRowsForSheet(
   sheet: WorkbookSheet,
   workbook?: FormulaWorkbook,
 ): number[] {
+  if (
+    (sheet.columnFilters && Object.keys(sheet.columnFilters).length > 0) ||
+    (sheet.hiddenRows && sheet.hiddenRows.length > 0)
+  ) {
+    return visibleRowsWithFilters(sheet, workbook)
+  }
   const rows = Array.from({ length: sheet.rowCount }, (_, row) => row)
   if (sheet.filterRow !== 0) return rows
   const filterColumn = Math.max(0, Math.floor(sheet.filterColumn ?? 0))
@@ -1879,6 +1888,7 @@ export function updateChart(
       range,
       labels: derived.labels,
       values: derived.values,
+      series: derived.series,
     }
   }
   return {
@@ -1933,6 +1943,21 @@ function chartFromRange(
 ): WorkbookChart | null {
   const bounds = parseRangeBounds(rangeToken)
   if (!bounds) return null
+  const colSpan = bounds.end.column - bounds.start.column + 1
+  if (colSpan >= 3) {
+    const extracted = extractChartData(sheet, rangeToken, type, formulaWorkbook ?? undefined)
+    if (extracted) {
+      return {
+        id: nextChartId(),
+        title: `${rangeToken} ${type} chart`,
+        type,
+        range: rangeToken,
+        labels: extracted.labels,
+        values: extracted.values,
+        series: extracted.series,
+      }
+    }
+  }
   const rows: Array<{ label: string; value: number }> = []
   const hasLabelColumn = bounds.end.column > bounds.start.column
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
@@ -2041,6 +2066,7 @@ function formulaResultsFor(sheet: WorkbookSheet): Map<string, string> {
 /** The sheets a formula may name (Sheet2!A1). */
 export interface FormulaWorkbook {
   sheets: readonly WorkbookSheet[]
+  namedRanges?: readonly import('../types').NamedRange[]
 }
 /** The workbook of the evaluation under way: set by the public entry points, kept by everything they call. */
 let formulaWorkbook: FormulaWorkbook | null = null
@@ -2089,7 +2115,15 @@ function evaluateFormulaHere(sheet: WorkbookSheet, formula: string): string {
   }
   formulaEvaluationDepth += 1
   try {
-    const expression = formula.trim().replace(/^=/, '')
+    const expanded = formulaWorkbook?.namedRanges?.length
+      ? resolveNamedRangesInFormula(
+          formula,
+          formulaWorkbook.namedRanges,
+          formulaWorkbook.sheets,
+          sheet.id,
+        )
+      : formula
+    const expression = expanded.trim().replace(/^=/, '')
     if (!expression) return '#FORMULA'
     const result = evaluateExpressionString(sheet, expression)
     return result ?? '#FORMULA'
@@ -2915,11 +2949,20 @@ function formatCellValue(value: string, style: SheetCell['style']): string {
     if (!Number.isFinite(numeric)) return value
     return decimals !== undefined ? numeric.toFixed(decimals) : String(numeric)
   }
-  if (style.numberFormat === 'currency') {
+  if (style.numberFormat === 'currency' || style.numberFormat === 'accounting') {
+    const currencyCode =
+      style.currencySymbol === '€'
+        ? 'EUR'
+        : style.currencySymbol === '£'
+        ? 'GBP'
+        : style.currencySymbol === '¥'
+        ? 'JPY'
+        : 'USD'
     return Number.isFinite(numeric)
       ? new Intl.NumberFormat('en-US', {
           style: 'currency',
-          currency: 'USD',
+          currency: currencyCode,
+          currencySign: style.numberFormat === 'accounting' ? 'accounting' : 'standard',
           ...(decimals !== undefined
             ? {
                 minimumFractionDigits: decimals,
@@ -2941,6 +2984,17 @@ function formatCellValue(value: string, style: SheetCell['style']): string {
             : { maximumFractionDigits: 2 }),
         }).format(numeric)
       : value
+  }
+  if (style.numberFormat === 'scientific') {
+    return Number.isFinite(numeric)
+      ? numeric.toExponential(decimals ?? 2).toUpperCase()
+      : value
+  }
+  if (style.numberFormat === 'time') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime())
+      ? value
+      : date.toISOString().slice(11, 19)
   }
   if (style.numberFormat === 'date') {
     const date = new Date(value)

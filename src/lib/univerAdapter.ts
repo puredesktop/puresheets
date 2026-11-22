@@ -29,10 +29,14 @@ import {
   MAX_PERSISTED_ROWS,
   MAX_SHEET_COLUMNS,
   MAX_SHEET_ROWS,
+  normalizeColumnFilters,
   normalizeComments,
   normalizeConditionalFormats,
   normalizeFilterQuery,
   normalizeHexColor,
+  normalizeIndexList,
+  normalizeNamedRanges,
+  normalizePivotDefinition,
   normalizeProtection,
   normalizeValidations,
 } from './sheetMetadataNormalize'
@@ -140,6 +144,7 @@ export function createUniverSnapshot(
       puresheets: {
         activeSheetId: document.workbook.activeSheetId,
         updatedAt: document.metadata.updatedAt,
+        namedRanges: document.workbook.namedRanges ?? null,
       },
     },
   }
@@ -234,6 +239,10 @@ export function documentFromUniverSnapshot(
     workbook: {
       activeSheetId,
       sheets,
+      namedRanges:
+        'namedRanges' in custom
+          ? normalizeNamedRanges(custom.namedRanges)
+          : fallback?.workbook.namedRanges,
       agentLog: fallback?.workbook.agentLog,
     },
   })
@@ -265,8 +274,8 @@ function createUniverSheetSnapshot(
     id: sheet.id,
     name: sheet.name,
     defaultStyle: CELL_DEFAULT_STYLE,
-    tabColor: '',
-    hidden: BooleanNumber.FALSE,
+    tabColor: sheet.tabColor ?? '',
+    hidden: sheet.hidden ? BooleanNumber.TRUE : BooleanNumber.FALSE,
     freeze: {
       startRow: sheet.frozenRows ? sheet.frozenRows : -1,
       startColumn: sheet.frozenColumns ? sheet.frozenColumns : -1,
@@ -290,21 +299,12 @@ function createUniverSheetSnapshot(
         : []
     }),
     cellData: collectCellData(sheet, registry),
-    rowData: Object.fromEntries(
-      Object.entries(sheet.rowHeights ?? {}).map(([row, height]) => [
-        row,
-        { h: height },
-      ]),
-    ),
-    columnData: Object.fromEntries(
-      Object.entries(sheet.columnWidths ?? {}).map(([column, width]) => [
-        column,
-        { w: width },
-      ]),
-    ),
+    rowData: buildRowData(sheet),
+    columnData: buildColumnData(sheet),
     rowHeader: { width: ROW_HEADER_WIDTH },
     columnHeader: { height: COLUMN_HEADER_HEIGHT },
-    showGridlines: BooleanNumber.TRUE,
+    showGridlines:
+      sheet.showGridlines === false ? BooleanNumber.FALSE : BooleanNumber.TRUE,
     rightToLeft: BooleanNumber.FALSE,
     custom: {
       puresheets: {
@@ -315,6 +315,10 @@ function createUniverSheetSnapshot(
         filterColumn: sheet.filterColumn ?? null,
         filterHasHeader: sheet.filterHasHeader ?? null,
         filterQuery: sheet.filterQuery ?? null,
+        columnFilters: sheet.columnFilters ?? null,
+        pivot: sheet.pivot ?? null,
+        hiddenRows: sheet.hiddenRows ?? null,
+        hiddenColumns: sheet.hiddenColumns ?? null,
         comments: sheet.comments ?? null,
         validations: sheet.validations ?? null,
         protection: sheet.protection ?? null,
@@ -382,6 +386,30 @@ function workbookSheetFromUniverSheet(
     merges: Array.isArray(sheet.mergeData)
       ? mergesFromUniverData(sheet.mergeData)
       : fallback?.merges,
+    tabColor:
+      typeof sheet.tabColor === 'string' && sheet.tabColor.trim()
+        ? normalizeHexColor(sheet.tabColor) ?? fallback?.tabColor
+        : fallback?.tabColor,
+    hidden:
+      sheet.hidden === BooleanNumber.TRUE
+        ? true
+        : sheet.hidden === BooleanNumber.FALSE
+        ? undefined
+        : fallback?.hidden,
+    showGridlines:
+      sheet.showGridlines === BooleanNumber.FALSE
+        ? false
+        : sheet.showGridlines === BooleanNumber.TRUE
+        ? undefined
+        : fallback?.showGridlines,
+    hiddenRows:
+      'hiddenRows' in custom
+        ? normalizeIndexList(custom.hiddenRows)
+        : fallback?.hiddenRows,
+    hiddenColumns:
+      'hiddenColumns' in custom
+        ? normalizeIndexList(custom.hiddenColumns)
+        : fallback?.hiddenColumns,
     filterRow:
       'filterRow' in custom
         ? optionalNumber(custom.filterRow)
@@ -402,6 +430,14 @@ function workbookSheetFromUniverSheet(
       'filterQuery' in custom
         ? normalizeFilterQuery(custom.filterQuery)
         : fallback?.filterQuery,
+    columnFilters:
+      'columnFilters' in custom
+        ? normalizeColumnFilters(custom.columnFilters)
+        : fallback?.columnFilters,
+    pivot:
+      'pivot' in custom
+        ? normalizePivotDefinition(custom.pivot)
+        : fallback?.pivot,
     comments:
       'comments' in custom
         ? normalizeComments(custom.comments)
@@ -464,13 +500,26 @@ function cellsFromUniverSheet(
           : undefined
       if (univerStyle?.vt === VerticalAlign.MIDDLE && fallbackCell?.style?.verticalAlign === 'middle')
         style = { ...style, verticalAlign: 'middle' }
-      const custom = cell.custom as { puresheetsKind?: unknown; puresheetsNumberText?: unknown } | undefined
+      const custom = cell.custom as {
+        puresheetsKind?: unknown
+        puresheetsNumberText?: unknown
+        puresheetsHyperlink?: unknown
+        puresheetsCheckbox?: unknown
+      } | undefined
       const preservedNumber = custom?.puresheetsKind === 'number' && (
         custom.puresheetsNumberText === value ||
         // Older snapshots only marked the kind; retain literals that required text storage.
         (custom.puresheetsNumberText === undefined && value.trim() !== '' && !Number.isNaN(Number(value)) &&
           (!Number.isFinite(Number(value)) || (Number.isInteger(Number(value)) && !Number.isSafeInteger(Number(value)))))
       )
+      const hyperlink =
+        typeof custom?.puresheetsHyperlink === 'string' && custom.puresheetsHyperlink.trim()
+          ? custom.puresheetsHyperlink
+          : fallbackCells?.[key]?.hyperlink
+      const checkbox =
+        typeof custom?.puresheetsCheckbox === 'boolean'
+          ? custom.puresheetsCheckbox
+          : fallbackCells?.[key]?.checkbox
       cells[key] = {
         value,
         kind: cell.f
@@ -481,6 +530,8 @@ function cellsFromUniverSheet(
           ? 'text'
           : 'blank',
         style,
+        ...(hyperlink ? { hyperlink } : {}),
+        ...(checkbox ? { checkbox } : {}),
       }
     }
   }
@@ -507,17 +558,33 @@ function fromUniverStyle(style: IStyleData | undefined): CellStyle | undefined {
   if (typeof style.ul === 'object' ? style.ul?.s : style.ul) {
     cellStyle.underline = true
   }
+  if (typeof style.st === 'object' ? style.st?.s : style.st) {
+    cellStyle.strikethrough = true
+  }
+  if (typeof style.ff === 'string' && style.ff.trim() && style.ff !== 'Arial') {
+    cellStyle.fontFamily = style.ff
+  }
   const fontSize = clampFontSize(style.fs)
   if (fontSize !== undefined) cellStyle.fontSize = fontSize
   const textColor = normalizeHexColor(style.cl?.rgb)
   if (textColor) cellStyle.textColor = textColor
   const fillColor = normalizeHexColor(style.bg?.rgb)
   if (fillColor) cellStyle.fillColor = fillColor
-  const sides = BORDER_SIDES.filter(
+  const activeBorders = BORDER_SIDES.filter(
     ([key]) => style.bd?.[key] && style.bd[key]?.s !== BorderStyleTypes.NONE,
-  ).map(([, side]) => side)
+  )
+  const sides = activeBorders.map(([, side]) => side)
   if (sides.length === 4) cellStyle.border = true
   else if (sides.length) cellStyle.borderSides = sides
+  const firstBorder = activeBorders[0] ? style.bd?.[activeBorders[0][0]] : undefined
+  if (firstBorder?.s === BorderStyleTypes.DOUBLE) cellStyle.borderStyle = 'double'
+  else if (firstBorder?.s === BorderStyleTypes.MEDIUM) cellStyle.borderStyle = 'medium'
+  if (
+    typeof firstBorder?.cl?.rgb === 'string' &&
+    firstBorder.cl.rgb.toLowerCase() !== CELL_BORDER_COLOR.toLowerCase()
+  ) {
+    cellStyle.borderColor = firstBorder.cl.rgb
+  }
   if (style.ht === HorizontalAlign.CENTER) cellStyle.align = 'center'
   if (style.ht === HorizontalAlign.RIGHT) cellStyle.align = 'right'
   if (style.ht === HorizontalAlign.LEFT) cellStyle.align = 'left'
@@ -600,7 +667,36 @@ function createUniverCell(
   }
   const styleId = registerStyle(registry, cell.style)
   if (styleId) data.s = styleId
+  if (cell.hyperlink || cell.checkbox) {
+    data.custom = {
+      ...(data.custom as Record<string, unknown> | undefined),
+      ...(cell.hyperlink ? { puresheetsHyperlink: cell.hyperlink } : {}),
+      ...(cell.checkbox ? { puresheetsCheckbox: true } : {}),
+    }
+  }
   return data
+}
+
+function buildRowData(sheet: WorkbookSheet): IWorksheetData['rowData'] {
+  const rows: Record<string, { h?: number; hd?: BooleanNumber }> = {}
+  for (const [row, height] of Object.entries(sheet.rowHeights ?? {})) {
+    rows[row] = { ...rows[row], h: height }
+  }
+  for (const row of sheet.hiddenRows ?? []) {
+    rows[String(row)] = { ...rows[String(row)], hd: BooleanNumber.TRUE }
+  }
+  return rows
+}
+
+function buildColumnData(sheet: WorkbookSheet): IWorksheetData['columnData'] {
+  const cols: Record<string, { w?: number; hd?: BooleanNumber }> = {}
+  for (const [col, width] of Object.entries(sheet.columnWidths ?? {})) {
+    cols[col] = { ...cols[col], w: width }
+  }
+  for (const col of sheet.hiddenColumns ?? []) {
+    cols[String(col)] = { ...cols[String(col)], hd: BooleanNumber.TRUE }
+  }
+  return cols
 }
 
 function toUniverStyle(style: CellStyle | undefined): IStyleData {
@@ -611,6 +707,9 @@ function toUniverStyle(style: CellStyle | undefined): IStyleData {
   if (style.italic) data.it = BooleanNumber.TRUE
   if (style.underline)
     data.ul = { s: BooleanNumber.TRUE, t: TextDecoration.SINGLE }
+  if (style.strikethrough)
+    data.st = { s: BooleanNumber.TRUE }
+  if (style.fontFamily) data.ff = style.fontFamily
   const fontSize = clampFontSize(style.fontSize)
   if (fontSize !== undefined) data.fs = fontSize
   const textColor = normalizeHexColor(style.textColor)
@@ -621,7 +720,16 @@ function toUniverStyle(style: CellStyle | undefined): IStyleData {
     ? BORDER_SIDES
     : BORDER_SIDES.filter(([, side]) => style.borderSides?.includes(side))
   if (sides.length) {
-    const border = { s: BorderStyleTypes.THIN, cl: { rgb: CELL_BORDER_COLOR } }
+    const borderType =
+      style.borderStyle === 'double'
+        ? BorderStyleTypes.DOUBLE
+        : style.borderStyle === 'medium'
+        ? BorderStyleTypes.MEDIUM
+        : BorderStyleTypes.THIN
+    const border = {
+      s: borderType,
+      cl: { rgb: style.borderColor ?? CELL_BORDER_COLOR },
+    }
     data.bd = Object.fromEntries(sides.map(([key]) => [key, border]))
   }
   if (style.align) data.ht = horizontalAlign(style.align)

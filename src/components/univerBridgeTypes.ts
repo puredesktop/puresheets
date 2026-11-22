@@ -50,6 +50,13 @@ export type UniverEditorBridge = {
   setRowHeight: (row: number, height: number) => Promise<boolean>
   autoFitRows: (sheetId: string, rows: number[]) => Promise<boolean>
   autoFitColumns?: (sheetId: string, columns: number[]) => Promise<boolean>
+  mergeRange?: (range: string) => Promise<boolean>
+  unmergeRange?: (range: string) => Promise<boolean>
+  setShowGridlines?: (visible: boolean) => Promise<boolean>
+  setZoom?: (ratio: number) => Promise<boolean>
+  hideColumns?: (startColumn: number, count?: number) => Promise<boolean>
+  showColumns?: (startColumn: number, count?: number) => Promise<boolean>
+  setTabColor?: (sheetId: string, color: string) => Promise<boolean>
   setCellValue: (cell: string, value: string) => Promise<boolean>
   // True while the user is actively typing in a cell (edit box open) but has
   // not yet committed with Enter/Tab.
@@ -81,9 +88,10 @@ export type UniverFacadeWorksheet = {
     getRawValue?: () => unknown
     getValue?: () => unknown
     getValues?: () => unknown[][]
-    setBackgroundColor?: (color: string) => unknown
+    setBackgroundColor?: (color: string | null) => unknown
     setBorder?: (type: unknown, style: unknown, color?: string) => unknown
     setFontColor?: (color: string | null) => unknown
+    setFontFamily?: (fontFamily: string | null) => unknown
     setFontLine?: (
       line: 'none' | 'underline' | 'line-through' | null,
     ) => unknown
@@ -101,6 +109,9 @@ export type UniverFacadeWorksheet = {
     ) => unknown
     setWrap?: (isWrap: boolean) => unknown
     setWrapStrategy?: (strategy: unknown) => unknown
+    merge?: (options?: { isForceMerge?: boolean }) => unknown
+    breakApart?: () => unknown
+    clearFormat?: () => unknown
     setNumberFormat?: (pattern: string) => unknown
     setValue?: (value: string | number | boolean) => unknown
     setValues?: (
@@ -130,6 +141,12 @@ export type UniverFacadeWorksheet = {
   setActiveRange?: (range: unknown) => unknown
   hideRows?: (rowIndex: number, numRows?: number) => unknown
   showRows?: (rowIndex: number, numRows?: number) => unknown
+  hideColumns?: (columnIndex: number, numColumns?: number) => unknown
+  showColumns?: (columnIndex: number, numColumns?: number) => unknown
+  autoResizeColumn?: (columnPosition: number) => unknown
+  setHiddenGridlines?: (hidden: boolean) => unknown
+  zoom?: (ratio: number) => unknown
+  setTabColor?: (color: string) => unknown
   insertColumns?: (columnIndex: number, numColumns?: number) => unknown
   // Conditional formatting facade (from @univerjs/sheets-conditional-formatting).
   // All optional — the surface seeds rules best-effort and skips when absent.
@@ -143,7 +160,6 @@ export type UniverFacadeWorksheet = {
   setFrozenRows?: (rows: number) => unknown
   setRowHeight?: (rowPosition: number, height: number) => unknown
   autoFitRow?: (rowPosition: number) => unknown
-  autoResizeColumn?: (columnPosition: number) => unknown
   getMaxColumns?: () => number
   setName?: (name: string) => unknown
 }
