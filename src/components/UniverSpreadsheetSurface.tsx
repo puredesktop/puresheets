@@ -4,6 +4,7 @@ import styled from 'styled-components'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import '@univerjs/preset-sheets-conditional-formatting/lib/index.css'
 import { CELL_BORDER_COLOR } from '../constants'
+import { patternForFormat } from '../lib/numberFormats'
 import { cellKey, cellsInRange, columnLabel, parseCellKey } from '../lib/workbookModel'
 import { normalizeConditionalFormats } from '../lib/sheetMetadataNormalize'
 import { requestedSheetId } from '../lib/workbookView'
@@ -33,6 +34,10 @@ const REACT_OWNED_SHEET_METADATA = [
   'filterColumn',
   'filterHasHeader',
   'filterQuery',
+  'columnFilters',
+  'pivot',
+  'hiddenRows',
+  'hiddenColumns',
   'comments',
   'validations',
   'protection',
@@ -747,11 +752,20 @@ export function UniverSpreadsheetSurface({
             range.setFontStyle?.(patch.italic ? 'italic' : 'normal')
           if (patch.underline !== undefined)
             range.setFontLine?.(patch.underline ? 'underline' : 'none')
+          if (patch.strikethrough !== undefined)
+            range.setFontLine?.(patch.strikethrough ? 'line-through' : 'none')
+          if (patch.fontFamily !== undefined)
+            range.setFontFamily?.(patch.fontFamily || null)
           if (patch.fontSize !== undefined) range.setFontSize?.(patch.fontSize)
-          if (patch.textColor !== undefined)
-            range.setFontColor?.(patch.textColor)
-          if (patch.fillColor !== undefined)
-            range.setBackgroundColor?.(patch.fillColor)
+          if ('textColor' in patch)
+            range.setFontColor?.(patch.textColor ?? null)
+          if ('fillColor' in patch) {
+            try {
+              range.setBackgroundColor?.(patch.fillColor ?? null)
+            } catch {
+              // ignore if Univer rejects null background reset; model layer clears it
+            }
+          }
           if (patch.align !== undefined)
             range.setHorizontalAlignment?.(
               facadeHorizontalAlignment(patch.align),
@@ -775,16 +789,53 @@ export function UniverSpreadsheetSurface({
               return false
             }
           }
-          if (patch.numberFormat !== undefined)
+          if (patch.numberPattern !== undefined)
+            range.setNumberFormat?.(patch.numberPattern || 'General')
+          else if (patch.numberFormat !== undefined)
             range.setNumberFormat?.(
-              numberFormatPatternForUniver(patch.numberFormat, patch.decimals),
+              numberFormatPatternForUniver(
+                patch.numberFormat,
+                patch.decimals,
+                patch.currencySymbol,
+              ),
             )
-          if (patch.border !== undefined) {
-            const borderType = univerApi.Enum?.BorderType?.ALL ?? 'all'
-            const borderStyle = patch.border
-              ? univerApi.Enum?.BorderStyleTypes?.THIN ?? 'thin'
-              : univerApi.Enum?.BorderStyleTypes?.NONE ?? 'none'
-            range.setBorder?.(borderType, borderStyle, CELL_BORDER_COLOR)
+          if (patch.border !== undefined || patch.borderSides !== undefined) {
+            const borderColor = patch.borderColor ?? CELL_BORDER_COLOR
+            const borderStyleKey =
+              patch.borderStyle === 'double'
+                ? univerApi.Enum?.BorderStyleTypes?.DOUBLE ?? 'double'
+                : patch.borderStyle === 'medium'
+                ? univerApi.Enum?.BorderStyleTypes?.MEDIUM ?? 'medium'
+                : univerApi.Enum?.BorderStyleTypes?.THIN ?? 'thin'
+            const noneStyle = univerApi.Enum?.BorderStyleTypes?.NONE ?? 'none'
+            if (patch.border === false && !patch.borderSides?.length) {
+              range.setBorder?.(
+                univerApi.Enum?.BorderType?.ALL ?? 'all',
+                noneStyle,
+                borderColor,
+              )
+            } else if (patch.border === true) {
+              range.setBorder?.(
+                univerApi.Enum?.BorderType?.ALL ?? 'all',
+                borderStyleKey,
+                borderColor,
+              )
+            } else if (patch.borderSides?.length) {
+              range.setBorder?.(
+                univerApi.Enum?.BorderType?.ALL ?? 'all',
+                noneStyle,
+                borderColor,
+              )
+              const sideMap: Record<string, unknown> = {
+                top: univerApi.Enum?.BorderType?.TOP ?? 'top',
+                right: univerApi.Enum?.BorderType?.RIGHT ?? 'right',
+                bottom: univerApi.Enum?.BorderType?.BOTTOM ?? 'bottom',
+                left: univerApi.Enum?.BorderType?.LEFT ?? 'left',
+              }
+              for (const side of patch.borderSides) {
+                range.setBorder?.(sideMap[side], borderStyleKey, borderColor)
+              }
+            }
           }
           return exportSnapshotAfterBridgeEdit(worksheet)
         },
@@ -1017,6 +1068,59 @@ export function UniverSpreadsheetSurface({
           if (!workbook || !worksheet?.autoResizeColumn) return false
           for (const col of columns) worksheet.autoResizeColumn(col)
           return exportWorkbookAfterBridgeEdit(workbook, true)
+        },
+        mergeRange: async rangeToken =>
+          editActiveWorksheet(worksheet => {
+            const range = worksheet.getRange?.(rangeToken)
+            if (!range?.merge) return false
+            range.merge({ isForceMerge: true })
+            return true
+          }),
+        unmergeRange: async rangeToken =>
+          editActiveWorksheet(worksheet => {
+            const range = worksheet.getRange?.(rangeToken)
+            if (!range?.breakApart) return false
+            range.breakApart()
+            return true
+          }),
+        setShowGridlines: async visible =>
+          editActiveWorksheet(worksheet => {
+            if (!worksheet.setHiddenGridlines) return false
+            worksheet.setHiddenGridlines(!visible)
+            return true
+          }),
+        setZoom: async ratio => {
+          if (disposed) return false
+          const worksheet =
+            univerApi.getActiveWorkbook?.()?.getActiveSheet?.() ?? null
+          if (!worksheet?.zoom) return false
+          suppressExport = true
+          try {
+            worksheet.zoom(ratio)
+            return true
+          } finally {
+            liftSuppressionAfterRecalc()
+          }
+        },
+        hideColumns: async (startColumn, count = 1) =>
+          editActiveWorksheet(worksheet => {
+            if (!worksheet.hideColumns) return false
+            worksheet.hideColumns(startColumn, count)
+            return true
+          }),
+        showColumns: async (startColumn, count = 1) =>
+          editActiveWorksheet(worksheet => {
+            if (!worksheet.showColumns) return false
+            worksheet.showColumns(startColumn, count)
+            return true
+          }),
+        setTabColor: async (sheetId, color) => {
+          if (disposed) return false
+          const workbook = univerApi.getActiveWorkbook?.() ?? null
+          const worksheet = workbook?.getSheetBySheetId?.(sheetId)
+          if (!workbook || !worksheet?.setTabColor) return false
+          worksheet.setTabColor(color)
+          return exportWorkbookAfterBridgeEdit(workbook, true, false)
         },
         isCellEditing: () =>
           univerApi.getActiveWorkbook?.()?.isCellEditing?.() ?? false,
@@ -1457,8 +1561,48 @@ function buildUniverConditionalFormat(
     conditioned = numericOk
       ? builder.whenNumberEqualTo?.(numeric)
       : builder.whenTextEqualTo?.(value)
+  } else if (kind === 'not-equal') {
+    conditioned = numericOk
+      ? (builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>).whenNumberNotEqualTo?.(numeric)
+      : (builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>).whenTextDoesNotContain?.(value)
   } else if (kind === 'text-contains') {
     conditioned = builder.whenTextContains?.(value)
+  } else if (kind === 'blank') {
+    conditioned = (builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>).whenEmpty?.()
+  } else if (kind === 'not-blank') {
+    conditioned = (builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>).whenNotEmpty?.()
+  } else if (kind === 'duplicate') {
+    conditioned = (builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>).whenDuplicateValues?.()
+  } else if (kind === 'custom-formula' && value.trim()) {
+    conditioned = (builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>).whenFormulaSatisfied?.(value.trim())
+  } else if (kind === 'color-scale' && rule.colorScale) {
+    const ext = builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>
+    const colorScale = ext.setColorScale?.()
+    if (colorScale) {
+      const ranged = colorScale.setRanges?.([
+        {
+          startRow: start.row,
+          startColumn: start.column,
+          endRow: end.row,
+          endColumn: end.column,
+        },
+      ])
+      return ranged?.build?.() ?? null
+    }
+  } else if (kind === 'data-bar') {
+    const ext = builder as Record<string, ((...a: unknown[]) => UniverConditionalFormatBuilder | undefined) | undefined>
+    const dataBar = ext.setDataBar?.()
+    if (dataBar) {
+      const ranged = dataBar.setRanges?.([
+        {
+          startRow: start.row,
+          startColumn: start.column,
+          endRow: end.row,
+          endColumn: end.column,
+        },
+      ])
+      return ranged?.build?.() ?? null
+    }
   }
   if (!conditioned) return null
   let styled = conditioned
@@ -1483,19 +1627,9 @@ function buildUniverConditionalFormat(
 function numberFormatPatternForUniver(
   format: NonNullable<CellStyle['numberFormat']>,
   decimals?: number,
+  currencySymbol?: '$' | '€' | '£' | '¥',
 ): string {
-  const zeros =
-    decimals !== undefined && decimals > 0
-      ? `.${'0'.repeat(Math.min(decimals, 8))}`
-      : ''
-  if (format === 'currency')
-    return decimals === undefined ? '$#,##0.00' : `$#,##0${zeros}`
-  if (format === 'percent')
-    return decimals === undefined ? '0.00%' : `0${zeros}%`
-  if (format === 'date') return 'yyyy-mm-dd'
-  if (format === 'number')
-    return decimals === undefined ? '#,##0.########' : `#,##0${zeros}`
-  return '@'
+  return patternForFormat(format, decimals, currencySymbol)
 }
 
 const UniverMountFrame = styled.div`

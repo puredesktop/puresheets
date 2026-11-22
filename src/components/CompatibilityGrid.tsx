@@ -38,6 +38,7 @@ export function CompatibilityGrid({
   visibleRows,
   selectedCell,
   normalizedRange,
+  showFormulas = false,
   invalidCells,
   onPasteIntoCell,
   onPasteFromClipboard,
@@ -54,6 +55,7 @@ export function CompatibilityGrid({
   visibleRows: number[]
   selectedCell: string
   normalizedRange: string | null
+  showFormulas?: boolean
   /** Cell key → validation message, computed by the shell from the live
    *  workbook (the same map the Univer surface paints). */
   invalidCells: Map<string, string>
@@ -135,6 +137,7 @@ export function CompatibilityGrid({
           onSelect={onSelectCell}
           onSelectRange={onSelectRange}
           selectedRange={normalizedRange}
+          showFormulas={showFormulas}
           invalidCells={invalidCells}
           conditionalStyles={conditionalStyles}
           lockedCells={lockedCells}
@@ -159,6 +162,7 @@ function RowFragment({
   onSelect,
   onSelectRange,
   selectedRange,
+  showFormulas = false,
   invalidCells,
   conditionalStyles,
   lockedCells,
@@ -171,6 +175,7 @@ function RowFragment({
   selectedCell: string
   selectedRowHeader: boolean
   selectedRange: string | null
+  showFormulas?: boolean
   onPaste: (cell: string, text: string) => void
   onPasteFromClipboard: (cell?: string) => Promise<void>
   onClearSelectedRange: () => void
@@ -193,7 +198,14 @@ function RowFragment({
       {Array.from({ length: sheet.columnCount }, (_, column) => {
         const key = cellKey(row, column)
         const cell = sheet.cells[key]
-        const displayValue = displayCellValue(sheet, key, workbook)
+        const displayValue =
+          showFormulas && cell?.kind === 'formula'
+            ? cell.value
+            : cell?.checkbox
+            ? cell.value.trim().toUpperCase() === 'TRUE'
+              ? '☑'
+              : '☐'
+            : displayCellValue(sheet, key, workbook)
         const formulaError = isFormulaError(displayValue)
         const comment = sheet.comments?.[key]
         const invalidMessage = invalidCells.get(key)

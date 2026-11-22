@@ -168,31 +168,30 @@ describe('Excel import', () => {
     expect(warnings).toEqual([])
   })
 
-  it('names everything it could not carry, sheet by sheet', async () => {
+  it('preserves hyperlinks, strikethrough, fonts, hidden rows/sheets, validations, conditional formats, and named ranges while reporting remaining losses', async () => {
     const { document, warnings } = await importXlsxWorkbook(await buildLossyFixture(), 'Odds')
     const odds = warnings.find(line => line.startsWith('Odds:')) ?? ''
     for (const phrase of [
       'mixed text formatting',
-      'links (kept as their text)',
-      'struck-through',
-      'cells in Georgia',
-      'thick, dashed or double borders',
       'rotated text',
-      'hidden rows (shown)',
-      'data-validation rules',
-      'conditional-formatting rules',
       'pictures',
     ])
       expect(odds).toContain(phrase)
-    expect(warnings).toContain('Lookups: hidden sheet (shown as an ordinary sheet).')
-    expect(warnings.find(line => line.startsWith('Workbook:'))).toContain('named ranges')
-    // What it could not format, it still brought in.
+    // Features now natively supported round-trip without loss warnings:
     const sheet = sheetNamed(document, 'Odds')
     expect(sheet.cells.A1?.value).toBe('mixed text')
     expect(sheet.cells.A2?.value).toBe('Pure Science')
+    expect(sheet.cells.A2?.hyperlink).toBeTruthy()
+    expect(sheet.cells.A3?.style?.strikethrough).toBe(true)
+    expect(sheet.cells.A4?.style?.fontFamily).toBe('Georgia')
     expect(sheet.cells.A7?.value).toBe('Rich link')
     expect(sheet.cells.A8?.value).toBe('hidden row')
+    expect(sheet.hiddenRows).toContain(7)
+    expect(sheet.validations?.length).toBeGreaterThan(0)
+    expect(sheet.conditionalFormats?.length).toBeGreaterThan(0)
+    expect(sheetNamed(document, 'Lookups').hidden).toBe(true)
     expect(sheetNamed(document, 'Lookups').cells.A1?.value).toBe('kept')
+    expect(document.workbook.namedRanges?.length).toBeGreaterThan(0)
   })
 
   it('names charts, pivot tables and macros it finds in the file', async () => {
@@ -405,15 +404,17 @@ describe('Excel export', () => {
     expect(workbook.getWorksheet('Sheet 1')!.getCell('B3').value).toMatchObject({ formula: 'SUM(B2:B2)', result: 1200 })
   })
 
-  it('names what Excel will not get', async () => {
+  it('exports validations cleanly and names what Excel will not get', async () => {
     const base = buildDocument()
     const sheet: WorkbookSheet = {
       ...base.workbook.sheets[0],
       charts: [{ id: 'c1', title: 'Revenue', type: 'bar', range: 'A1:B2', labels: ['North'], values: [1200] }],
       validations: [{ id: 'v1', range: 'C1:C3', kind: 'list', options: ['Yes', 'No'] }],
     }
-    const { warnings } = await exportXlsxWorkbook({ ...base, workbook: { ...base.workbook, sheets: [sheet] } })
-    expect(warnings).toEqual(['Sheet 1: charts (Excel will not get them); data-validation rules.'])
+    const { bytes, warnings } = await exportXlsxWorkbook({ ...base, workbook: { ...base.workbook, sheets: [sheet] } })
+    expect(warnings).toEqual(['Sheet 1: charts (Excel will not get them).'])
+    const reimported = await importXlsxWorkbook(bytes, 'Roundtrip')
+    expect(reimported.document.workbook.sheets[0].validations?.length).toBeGreaterThan(0)
   })
 
   it('renames sheets Excel would refuse, and the formulas that point at them', async () => {

@@ -10,11 +10,25 @@ export type NumberFormatFamily = NonNullable<CellStyle['numberFormat']>
  */
 
 /** The code PureSheets writes for a family and decimal count. */
-export function patternForFormat(format: NumberFormatFamily, decimals?: number): string {
+export function patternForFormat(
+  format: NumberFormatFamily,
+  decimals?: number,
+  currencySymbol: '$' | '€' | '£' | '¥' = '$',
+): string {
   const zeros = decimals !== undefined && decimals > 0 ? `.${'0'.repeat(Math.min(decimals, 8))}` : ''
-  if (format === 'currency') return decimals === undefined ? '$#,##0.00' : `$#,##0${zeros}`
+  if (format === 'currency') {
+    const sym = currencySymbol === '$' ? '$' : `[$${currencySymbol}]`
+    return decimals === undefined ? `${sym}#,##0.00` : `${sym}#,##0${zeros}`
+  }
+  if (format === 'accounting') {
+    const sym = currencySymbol === '$' ? '$' : `[$${currencySymbol}]`
+    const body = decimals === undefined ? '#,##0.00' : `#,##0${zeros}`
+    return `_("${sym}"* ${body}_);_("${sym}"* (${body});_("${sym}"* "-"??_);_(@_)`
+  }
   if (format === 'percent') return decimals === undefined ? '0.00%' : `0${zeros}%`
   if (format === 'date') return 'yyyy-mm-dd'
+  if (format === 'time') return 'hh:mm:ss'
+  if (format === 'scientific') return decimals === undefined ? '0.00E+00' : `0${zeros}E+00`
   if (format === 'number') return decimals === undefined ? '#,##0.########' : `#,##0${zeros}`
   return '@'
 }
@@ -30,8 +44,13 @@ export function familyOfPattern(pattern: string | undefined): NumberFormatFamily
   const bare = stripLiterals(first)
   if (bare.trim() === '@') return 'text'
   if (bare.includes('%')) return 'percent'
+  if (/e[+-]0/i.test(bare)) return 'scientific'
   // A currency sign counts quoted too: Excel's accounting format writes "$".
-  if (/[$€£¥]/.test(first.replace(/\[\$-[^\]]*\]/g, ''))) return 'currency'
+  if (/[$€£¥]/.test(first.replace(/\[\$-[^\]]*\]/g, ''))) {
+    if (first.includes('* ') && pattern.includes(';')) return 'accounting'
+    return 'currency'
+  }
+  if (/^h{1,2}:m{1,2}(:s{1,2})?/i.test(bare.trim()) && !/\[h\]/i.test(first)) return 'time'
   if (/[ymdhs]/i.test(bare) && !/[#?]/.test(bare)) return 'date'
   if (/[#0?]/.test(bare)) return 'number'
   if (bare.includes('@')) return 'text'
@@ -40,7 +59,7 @@ export function familyOfPattern(pattern: string | undefined): NumberFormatFamily
 
 /** Fixed fraction digits in a code's first section; undefined when they are optional (`.##`) or absent. */
 export function decimalsOfPattern(pattern: string, format: NumberFormatFamily): number | undefined {
-  if (format === 'date' || format === 'text') return undefined
+  if (format === 'date' || format === 'time' || format === 'text') return undefined
   const bare = stripLiterals(firstSection(pattern))
   if (/\.#/.test(bare)) return undefined
   const zeros = /\.(0+)/.exec(bare)?.[1]?.length ?? 0
@@ -48,7 +67,7 @@ export function decimalsOfPattern(pattern: string, format: NumberFormatFamily): 
     if (zeros > 0) return zeros
     return /^[#,0]+$/.test(bare) ? 0 : undefined
   }
-  // currency and percent default to two places
+  // currency, accounting, percent, scientific default to two places
   return zeros === 2 ? undefined : zeros
 }
 
@@ -58,14 +77,20 @@ export function decimalsOfPattern(pattern: string, format: NumberFormatFamily): 
  */
 export function styleFromPattern(
   pattern: string | undefined,
-): Pick<CellStyle, 'numberFormat' | 'decimals' | 'numberPattern'> | null {
+): Pick<CellStyle, 'numberFormat' | 'decimals' | 'numberPattern' | 'currencySymbol'> | null {
   const format = familyOfPattern(pattern)
   if (!format || !pattern) return null
   const decimals = decimalsOfPattern(pattern, format)
+  const currencyMatch = /([€£¥$])/.exec(pattern)
+  const currencySymbol =
+    (format === 'currency' || format === 'accounting') && currencyMatch
+      ? (currencyMatch[1] as '$' | '€' | '£' | '¥')
+      : undefined
   return {
     numberFormat: format,
+    ...(currencySymbol && currencySymbol !== '$' ? { currencySymbol } : {}),
     ...(decimals !== undefined ? { decimals } : {}),
-    ...(patternForFormat(format, decimals) !== pattern ? { numberPattern: pattern } : {}),
+    ...(patternForFormat(format, decimals, currencySymbol ?? '$') !== pattern ? { numberPattern: pattern } : {}),
   }
 }
 
@@ -73,7 +98,9 @@ export function styleFromPattern(
 export function patternOfStyle(style: CellStyle | undefined): string | undefined {
   if (!style) return undefined
   if (style.numberPattern) return style.numberPattern
-  return style.numberFormat ? patternForFormat(style.numberFormat, style.decimals) : undefined
+  return style.numberFormat
+    ? patternForFormat(style.numberFormat, style.decimals, style.currencySymbol)
+    : undefined
 }
 
 function firstSection(pattern: string): string {

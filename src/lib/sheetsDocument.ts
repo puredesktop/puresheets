@@ -22,10 +22,14 @@ import {
   isSafeRangeToken,
   MAX_PERSISTED_ROWS,
   MAX_SHEET_COLUMNS,
+  normalizeColumnFilters,
   normalizeComments,
   normalizeConditionalFormats,
   normalizeFilterQuery,
   normalizeHexColor,
+  normalizeIndexList,
+  normalizeNamedRanges,
+  normalizePivotDefinition,
   normalizeProtection,
   normalizeValidations,
 } from './sheetMetadataNormalize'
@@ -129,6 +133,7 @@ export function validateDocument(input: unknown): PureSheetsDocument {
     workbook: {
       activeSheetId,
       sheets,
+      namedRanges: normalizeNamedRanges(workbook.namedRanges),
       agentLog: normalizeAgentLog(workbook.agentLog),
     },
   }
@@ -185,6 +190,11 @@ function normalizeSheet(input: unknown): WorkbookSheet {
         ? Math.min(columnCount, Math.max(0, rawFrozenCols))
         : undefined,
     merges: normalizeMerges(input.merges),
+    tabColor: normalizeHexColor(input.tabColor),
+    hidden: input.hidden === true ? true : undefined,
+    showGridlines: input.showGridlines === false ? false : undefined,
+    hiddenRows: normalizeIndexList(input.hiddenRows),
+    hiddenColumns: normalizeIndexList(input.hiddenColumns),
     filterRow:
       rawFilterRow !== undefined && rawFilterRow >= 0 && rawFilterRow < rowCount
         ? rawFilterRow
@@ -200,6 +210,8 @@ function normalizeSheet(input: unknown): WorkbookSheet {
         ? input.filterHasHeader
         : undefined,
     filterQuery: normalizeFilterQuery(input.filterQuery),
+    columnFilters: normalizeColumnFilters(input.columnFilters),
+    pivot: normalizePivotDefinition(input.pivot),
     charts: normalizeCharts(input.charts),
     comments: normalizeComments(input.comments),
     validations: normalizeValidations(input.validations),
@@ -222,6 +234,10 @@ function normalizeCells(
       value: value.value,
       kind,
       style: normalizeCellStyle(value.style),
+      ...(typeof value.hyperlink === 'string' && value.hyperlink.trim()
+        ? { hyperlink: value.hyperlink.trim() }
+        : {}),
+      ...(value.checkbox === true ? { checkbox: true } : {}),
     }
   }
   return cells
@@ -242,6 +258,10 @@ function normalizeCellStyle(input: unknown): CellStyle | undefined {
   if (typeof input.bold === 'boolean') style.bold = input.bold
   if (typeof input.italic === 'boolean') style.italic = input.italic
   if (typeof input.underline === 'boolean') style.underline = input.underline
+  if (typeof input.strikethrough === 'boolean')
+    style.strikethrough = input.strikethrough
+  if (typeof input.fontFamily === 'string' && input.fontFamily.trim())
+    style.fontFamily = input.fontFamily.trim()
   if (['wrap', 'clip', 'overflow'].includes(input.wrap as string)) style.wrap = input.wrap as CellStyle['wrap']
   const fontSize = clampFontSize(input.fontSize)
   if (fontSize !== undefined) style.fontSize = fontSize
@@ -271,10 +291,31 @@ function normalizeCellStyle(input: unknown): CellStyle | undefined {
     input.numberFormat === 'text' ||
     input.numberFormat === 'number' ||
     input.numberFormat === 'currency' ||
+    input.numberFormat === 'accounting' ||
     input.numberFormat === 'percent' ||
-    input.numberFormat === 'date'
+    input.numberFormat === 'date' ||
+    input.numberFormat === 'time' ||
+    input.numberFormat === 'scientific'
   ) {
     style.numberFormat = input.numberFormat
+  }
+  if (
+    input.currencySymbol === '$' ||
+    input.currencySymbol === '€' ||
+    input.currencySymbol === '£' ||
+    input.currencySymbol === '¥'
+  ) {
+    style.currencySymbol = input.currencySymbol
+  }
+  if (
+    input.borderStyle === 'thin' ||
+    input.borderStyle === 'medium' ||
+    input.borderStyle === 'double'
+  ) {
+    style.borderStyle = input.borderStyle
+  }
+  if (typeof input.borderColor === 'string' && input.borderColor.trim()) {
+    style.borderColor = input.borderColor.trim()
   }
   // Carried from Excel imports: the exact format code, partial borders, vertical alignment.
   if (typeof input.numberPattern === 'string' && input.numberPattern.trim())
@@ -320,6 +361,18 @@ function optionalInteger(input: unknown): number | undefined {
     : undefined
 }
 
+const VALID_CHART_TYPES = new Set<WorkbookChart['type']>([
+  'bar',
+  'stacked-bar',
+  'horizontal-bar',
+  'line',
+  'area',
+  'combo',
+  'pie',
+  'donut',
+  'scatter',
+])
+
 function normalizeCharts(input: unknown): WorkbookChart[] | undefined {
   if (!Array.isArray(input)) return undefined
   const charts: WorkbookChart[] = input.flatMap(item => {
@@ -328,12 +381,8 @@ function normalizeCharts(input: unknown): WorkbookChart[] | undefined {
     if (
       typeof item.id !== 'string' ||
       typeof item.title !== 'string' ||
-      (chartType !== 'bar' &&
-        chartType !== 'line' &&
-        chartType !== 'area' &&
-        chartType !== 'pie' &&
-        chartType !== 'donut' &&
-        chartType !== 'scatter') ||
+      typeof chartType !== 'string' ||
+      !VALID_CHART_TYPES.has(chartType as WorkbookChart['type']) ||
       typeof item.range !== 'string' ||
       !Array.isArray(item.labels) ||
       !Array.isArray(item.values)
@@ -345,14 +394,32 @@ function normalizeCharts(input: unknown): WorkbookChart[] | undefined {
         typeof value === 'number' && Number.isFinite(value),
     )
     if (values.length !== item.values.length) return []
+    const series = Array.isArray(item.series)
+      ? item.series.flatMap(s => {
+          if (!isRecord(s) || typeof s.name !== 'string' || !Array.isArray(s.values))
+            return []
+          const nums = s.values.filter(
+            (v): v is number => typeof v === 'number' && Number.isFinite(v),
+          )
+          if (nums.length !== s.values.length) return []
+          return [
+            {
+              name: s.name,
+              values: nums,
+              color: typeof s.color === 'string' ? s.color : undefined,
+            },
+          ]
+        })
+      : undefined
     return [
       {
         id: item.id,
         title: item.title,
-        type: chartType,
+        type: chartType as WorkbookChart['type'],
         range: item.range,
         labels: item.labels.map(label => String(label)),
         values,
+        ...(series && series.length ? { series } : {}),
         legend:
           item.legend === 'right' ||
           item.legend === 'bottom' ||

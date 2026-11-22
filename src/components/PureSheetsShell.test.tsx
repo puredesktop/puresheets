@@ -11,7 +11,7 @@ import {
   loadSheetsHtmlDocument,
 } from '../lib/sheetsDocument'
 import type { UniverEditorBridge } from './univerBridgeTypes'
-import { createBlankWorkbook } from '../lib/workbookModel'
+import { createBlankWorkbook, upsertCell } from '../lib/workbookModel'
 import { PureSheetsShell } from './PureSheetsShell'
 import { updateCurrentWorkspaceTab } from '@purescience/platform-ui/bridge/workspace'
 import type { SheetsAgentToolContext } from '../agents/catalog'
@@ -87,6 +87,7 @@ vi.mock('@purescience/platform-ui/bridge/documents.mjs', () => ({
 vi.mock('@purescience/platform-ui/bridge/workspace', () => ({ updateCurrentWorkspaceTab: vi.fn(async () => ({ updated: true })) }))
 
 vi.mock('../bridge/platformBridge', () => ({
+  isStandaloneDevMode: () => false,
   openImportFile: (...args: unknown[]) => openImportFile(...args),
   writeBinaryFile: (...args: unknown[]) => writeBinaryFile(...args),
   chooseSaveFilePath: (...args: unknown[]) => chooseSaveFilePath(...args),
@@ -704,9 +705,11 @@ describe('PureSheetsShell file safety', () => {
       'CONCAT',
       'LEFT',
       'RIGHT',
+      'XLOOKUP',
       'VLOOKUP',
       'COUNTIF',
       'SUMIF',
+      'SUMIFS',
       'AVERAGEIF',
       'RANK',
       'IFERROR',
@@ -2476,7 +2479,10 @@ describe('Excel in and out', () => {
     sheet.addRows([['Quarter one'], ['Cost', 40], ['Total', null]])
     sheet.getCell('B3').value = { formula: 'SUM(B2:B2)', result: 40 }
     sheet.mergeCells('A1:B1')
-    excel.addWorksheet('Odds').getCell('A1').value = { text: 'site', hyperlink: 'https://pure.science' }
+    const oddsSheet = excel.addWorksheet('Odds')
+    oddsSheet.getCell('A1').value = { text: 'site', hyperlink: 'https://pure.science' }
+    oddsSheet.getCell('A2').value = 'tilted'
+    oddsSheet.getCell('A2').alignment = { textRotation: 45 }
     return Buffer.from(await excel.xlsx.writeBuffer()).toString('base64')
   }
 
@@ -2493,9 +2499,10 @@ describe('Excel in and out', () => {
     await act(async () => { await flushAsync() })
     await act(async () => { await agentContext.openWorkbook!('/work/plan.xlsx'); await flushAsync() })
     expect(agentContext.document?.workbook.sheets[0]?.merges).toEqual(['A1:B1'])
+    expect(agentContext.document?.workbook.sheets[1]?.cells.A1?.hyperlink).toBe('https://pure.science')
     const notice = document.querySelector('[aria-label="Import warnings"]')
     expect(notice?.textContent).toContain('Imported with limitations')
-    expect(notice?.textContent).toContain('Odds: links (kept as their text).')
+    expect(notice?.textContent).toContain('Odds: rotated text (shown level).')
   })
 
   it('saves as Excel from the Data menu and from the agent tool through the same writer', async () => {
@@ -2539,5 +2546,112 @@ describe('Excel in and out', () => {
     await expect(agentContext.saveAsXlsx!('/work/plan.csv', true)).rejects.toThrow(/must end in \.xlsx/)
     await act(async () => { await agentContext.saveAsXlsx!('/work/plan.xlsx', true) })
     expect(writeBinaryFile).toHaveBeenCalledWith('/work/plan.xlsx', expect.any(String))
+  })
+})
+
+describe('Waves 1-5 Parity UX & Power Features', () => {
+  function setFieldValue(input: HTMLInputElement, value: string): void {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set
+    setter?.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  it('opens the Cmd+K Command Palette, filters commands, and executes actions', async () => {
+    render(<PureSheetsShell initialDocument={createBlankWorkbook('Palette Test')} />)
+    await act(async () => { await flushAsync() })
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }))
+    })
+    const search = document.querySelector<HTMLInputElement>('input[aria-label="Search commands"]')
+    expect(search).toBeTruthy()
+    await act(async () => {
+      setFieldValue(search!, 'named ranges')
+    })
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('[aria-label="Matching commands"] [role="option"]'))
+    expect(options.some(o => o.textContent?.includes('Named Ranges'))).toBe(true)
+    await act(async () => { options[0].click() })
+    expect(document.querySelector('[aria-label="Sheet inspector"]')).toBeTruthy()
+  })
+
+  it('merges/unmerges cells, creates named ranges, and builds a live Pivot sheet from the UI', async () => {
+    let doc = createBlankWorkbook('Parity Flow')
+    let sheet = upsertCell(doc.workbook.sheets[0], 'A1', 'Region')
+    sheet = upsertCell(sheet, 'B1', 'Revenue')
+    sheet = upsertCell(sheet, 'A2', 'North')
+    sheet = upsertCell(sheet, 'B2', '100')
+    sheet = upsertCell(sheet, 'A3', 'South')
+    sheet = upsertCell(sheet, 'B3', '250')
+    doc = { ...doc, workbook: { ...doc.workbook, sheets: [sheet] } }
+
+    render(<PureSheetsShell initialDocument={doc} />)
+    await act(async () => { await flushAsync() })
+
+    const rangeInput = document.querySelector<HTMLInputElement>('input[aria-label="Selected range"]')!
+    await act(async () => {
+      setFieldValue(rangeInput, 'A1:B3')
+      rangeInput.dispatchEvent(new FocusEvent('blur', { bubbles: true }))
+    })
+
+    // Trigger Pivot Table creation
+    const pivotBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Insert Pivot Table"]')
+    expect(pivotBtn).toBeTruthy()
+    await act(async () => { pivotBtn!.click() })
+
+    expect(agentContext.document?.workbook.sheets.length).toBe(2)
+    const pivotSheet = agentContext.document?.workbook.sheets[1]
+    expect(pivotSheet?.pivot).toBeTruthy()
+    expect(pivotSheet?.cells.A4?.value).toBe('Grand Total')
+    expect(pivotSheet?.cells.B4?.value).toBe('350')
+  })
+
+  it('shows live function parameter hints and one-click IFERROR fix in the Formula Bar', async () => {
+    let doc = createBlankWorkbook('Formula UX')
+    let sheet = upsertCell(doc.workbook.sheets[0], 'A1', '10')
+    sheet = upsertCell(sheet, 'B1', '0')
+    sheet = upsertCell(sheet, 'C1', '=A1/B1')
+    doc = { ...doc, workbook: { ...doc.workbook, sheets: [sheet] } }
+
+    render(<PureSheetsShell initialDocument={doc} />)
+    await act(async () => { await flushAsync() })
+
+    const cellC1 = document.querySelector<HTMLButtonElement>('button[aria-label="C1"]')!
+    await act(async () => { cellC1.click() })
+
+    // Error pill should appear and offer IFERROR fix
+    const errPill = Array.from(document.querySelectorAll('button')).find(
+      b => b.textContent?.trim() === '#DIV/0!',
+    )
+    expect(errPill).toBeTruthy()
+    await act(async () => { errPill!.click() })
+    const fixBtn = Array.from(document.querySelectorAll('button')).find(
+      b => b.textContent?.includes('Wrap in IFERROR'),
+    )
+    expect(fixBtn).toBeTruthy()
+    await act(async () => { fixBtn!.click() })
+    expect(agentContext.document?.workbook.sheets[0].cells.C1?.value).toBe('=IFERROR(A1/B1, 0)')
+  })
+
+  it('toggles Show Formulas (Ctrl+`) and displays raw formulas on the grid and overview strip', async () => {
+    let doc = createBlankWorkbook('Show Formulas')
+    let sheet = upsertCell(doc.workbook.sheets[0], 'A1', '4')
+    sheet = upsertCell(sheet, 'B1', '6')
+    sheet = upsertCell(sheet, 'C1', '=A1+B1')
+    doc = { ...doc, workbook: { ...doc.workbook, sheets: [sheet] } }
+
+    render(<PureSheetsShell initialDocument={doc} />)
+    await act(async () => { await flushAsync() })
+
+    const cellC1 = document.querySelector<HTMLButtonElement>('button[aria-label="C1"]')!
+    expect(cellC1.textContent).toBe('10')
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '`', ctrlKey: true, bubbles: true }))
+    })
+    expect(cellC1.textContent).toBe('=A1+B1')
+    expect(document.querySelector('[aria-label="Sheet formulas overview"]')?.textContent).toContain('C1:')
   })
 })
