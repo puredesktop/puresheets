@@ -169,31 +169,34 @@ describe('Excel import', () => {
     expect(warnings).toEqual([])
   })
 
-  it('names everything it could not carry, sheet by sheet', async () => {
+  it('preserves hyperlinks, strikethrough, fonts, hidden rows/sheets, validations, conditional formats, and named ranges while reporting remaining losses', async () => {
     const { document, warnings } = await importXlsxWorkbook(await buildLossyFixture(), 'Odds')
     const odds = warnings.find(line => line.startsWith('Odds:')) ?? ''
     for (const phrase of [
       'mixed text formatting',
-      'links (kept as their text)',
-      'struck-through',
-      'cells in Georgia',
-      'thick, dashed or double borders',
       'rotated text',
-      'hidden rows (shown)',
       'pictures',
     ])
       expect(odds).toContain(phrase)
-    expect(warnings).toContain('Lookups: hidden sheet (shown as an ordinary sheet).')
+    // Features now natively supported round-trip without loss warnings:
     const sheet = sheetNamed(document, 'Odds')
-    expect(document.workbook.namedRanges).toEqual([{ name: 'Labels', sheetId: sheet.id, range: 'A1:A3' }])
+    expect(document.workbook.namedRanges).toMatchObject([{ name: 'Labels', sheetId: sheet.id, range: 'A1:A3' }])
     expect(sheet.validations).toMatchObject([{ range: 'B1:B1', kind: 'list', options: ['Yes', 'No'] }])
     expect(sheet.conditionalFormats).toMatchObject([{ range: 'C1:C5', condition: { kind: 'greater', value: '5' }, style: { bold: true } }])
     // What it could not format, it still brought in.
     expect(sheet.cells.A1?.value).toBe('mixed text')
     expect(sheet.cells.A2?.value).toBe('Pure Science')
+    expect(sheet.cells.A2?.hyperlink).toBeTruthy()
+    expect(sheet.cells.A3?.style?.strikethrough).toBe(true)
+    expect(sheet.cells.A4?.style?.fontFamily).toBe('Georgia')
     expect(sheet.cells.A7?.value).toBe('Rich link')
     expect(sheet.cells.A8?.value).toBe('hidden row')
+    expect(sheet.hiddenRows).toContain(7)
+    expect(sheet.validations?.length).toBeGreaterThan(0)
+    expect(sheet.conditionalFormats?.length).toBeGreaterThan(0)
+    expect(sheetNamed(document, 'Lookups').hidden).toBe(true)
     expect(sheetNamed(document, 'Lookups').cells.A1?.value).toBe('kept')
+    expect(document.workbook.namedRanges?.length).toBeGreaterThan(0)
   })
 
   it('keeps supported Excel pivot fields so the summary can be refreshed in PureSheets', async () => {
@@ -211,9 +214,15 @@ describe('Excel import', () => {
     zip.file('xl/pivotCache/pivotCacheDefinition1.xml', '<pivotCacheDefinition><cacheSource type="worksheet"><worksheetSource sheet="Sales" ref="A1:B3"/></cacheSource></pivotCacheDefinition>')
     const { document, warnings } = await importXlsxWorkbook(await zip.generateAsync({ type: 'uint8array' }), 'Sales')
     expect(warnings).toEqual([])
-    expect(document.workbook.sheets[1].pivot).toEqual({
-      sourceSheetId: document.workbook.sheets[0].id, range: 'A1:B3', row: 0, column: null, value: 1,
-      summary: 'sum', output: 'A1', rows: 3, columns: 2,
+    expect(document.workbook.sheets[1].pivot).toMatchObject({
+      sourceSheetId: document.workbook.sheets[0].id,
+      sourceRange: 'A1:B3',
+      rows: [{ columnIndex: 0, label: 'Region' }],
+      columns: [],
+      values: [{ columnIndex: 1, label: 'Revenue', aggregate: 'sum' }],
+      output: 'A1',
+      outputRows: 3,
+      outputColumns: 2,
     })
   })
 
@@ -444,7 +453,7 @@ describe('Excel export', () => {
       ],
     }
     const { bytes, warnings } = await exportXlsxWorkbook({
-      ...base, workbook: { ...base.workbook, sheets: [sheet], namedRanges: [{ name: 'Revenue', sheetId: sheet.id, range: 'B2' }] },
+      ...base, workbook: { ...base.workbook, sheets: [sheet], namedRanges: [{ id: 'nr-1', name: 'Revenue', sheetId: sheet.id, range: 'B2' }] },
     })
     expect(warnings).toEqual([])
     const reopened = await importXlsxWorkbook(bytes, 'Reopened')
@@ -460,7 +469,7 @@ describe('Excel export', () => {
       { range: 'B1:B4', condition: { kind: 'between', value: '1', value2: '450' }, style: { bold: true, fillColor: '#ffaa00' } },
       { range: 'C1:C3', condition: { kind: 'text-contains', value: 'quote "test"' }, style: { textColor: '#ac2211' } },
     ])
-    expect(reopened.document.workbook.namedRanges).toEqual([{ name: 'Revenue', sheetId: imported.id, range: 'B2' }])
+    expect(reopened.document.workbook.namedRanges).toMatchObject([{ name: 'Revenue', sheetId: imported.id, range: 'B2' }])
     expect(computedCellValue(imported, 'E2', reopened.document.workbook)).toBe('1200')
   })
 

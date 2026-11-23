@@ -1,28 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
 import { MetaText } from '@purescience/platform-ui/components/common/containers/AppChrome'
-import { Maximize2, Pencil, X } from 'lucide-react'
+import { Download, Maximize2, Pencil, X } from 'lucide-react'
 import { ToolIconButton } from './controls'
+import { chartSeriesOf, CHART_SERIES_COLORS } from '../lib/chartEngine'
 import type { WorkbookChart, WorkbookChartType } from '../types'
 
-/**
- * Chart shelf for the active sheet (Phase S4): bar, line, area, pie, donut,
- * and scatter charts with an inline editor (range, title, type, legend
- * placement, axis labels). Chart data lives in the `.sheets` document —
- * PureSheets-owned metadata, persisted alongside the snapshot.
- */
-
-const SERIES_COLORS = [
-  '#377d5a',
-  '#1d6fa5',
-  '#8a5aa8',
-  '#b06b1f',
-  '#a8385a',
-  '#5b7161',
-  '#946f43',
-  '#3f6f8f',
-]
+const SERIES_COLORS = CHART_SERIES_COLORS
 
 export type ChartUpdatePatch = Partial<
   Pick<
@@ -33,8 +18,11 @@ export type ChartUpdatePatch = Partial<
 
 const CHART_TYPE_OPTIONS: Array<{ value: WorkbookChartType; label: string }> = [
   { value: 'bar', label: 'Bar' },
+  { value: 'stacked-bar', label: 'Stacked' },
+  { value: 'horizontal-bar', label: 'Horiz Bar' },
   { value: 'line', label: 'Line' },
   { value: 'area', label: 'Area' },
+  { value: 'combo', label: 'Combo' },
   { value: 'pie', label: 'Pie' },
   { value: 'donut', label: 'Donut' },
   { value: 'scatter', label: 'Scatter' },
@@ -90,8 +78,25 @@ function ChartCardBody({
 }): React.ReactElement {
   const [editing, setEditing] = useState(false)
   const [maximized, setMaximized] = useState(false)
+  const chartBoxRef = useRef<HTMLDivElement | null>(null)
 
-  const legend = chart.legend ?? (isRadial(chart.type) ? 'right' : 'none')
+  const series = chartSeriesOf(chart)
+  const isMulti = series.length > 1 && !isRadial(chart.type)
+  const legend =
+    chart.legend ?? (isRadial(chart.type) || isMulti ? 'right' : 'none')
+
+  function downloadSvg(): void {
+    const svg = chartBoxRef.current?.querySelector('svg')
+    if (!svg) return
+    const serialized = new XMLSerializer().serializeToString(svg)
+    const blob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${chart.title.replace(/[^a-z0-9-_]+/gi, '_') || 'chart'}.svg`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   return (
     <>
@@ -100,9 +105,15 @@ function ChartCardBody({
           <ChartTitle>{chart.title}</ChartTitle>
           <ChartMeta>
             {chart.range} · {chart.type}
+            {isMulti ? ` · ${series.length} series` : ''}
           </ChartMeta>
         </div>
         <ChartHeaderActions>
+          <ToolIconButton
+            title="Download SVG"
+            onClick={downloadSvg}
+            icon={Download}
+          />
           <ToolIconButton
             title="Maximize chart"
             onClick={() => setMaximized(true)}
@@ -129,21 +140,30 @@ function ChartCardBody({
         />
       )}
 
-      <ChartWithLegend $legend={legend}>
+      <ChartWithLegend ref={chartBoxRef} $legend={legend}>
         <MiniChart chart={chart} />
         {legend !== 'none' && (
           <ChartLegend
             $placement={legend === 'right' ? 'right' : 'bottom'}
             aria-label="Chart legend"
           >
-            {chart.labels.slice(0, 8).map((label, index) => (
-              <LegendItem key={`${label}-${index}`}>
-                <LegendSwatch
-                  $color={SERIES_COLORS[index % SERIES_COLORS.length]}
-                />
-                <span>{label}</span>
-              </LegendItem>
-            ))}
+            {isMulti
+              ? series.map((s, index) => (
+                  <LegendItem key={`${s.name}-${index}`}>
+                    <LegendSwatch
+                      $color={s.color ?? SERIES_COLORS[index % SERIES_COLORS.length]}
+                    />
+                    <span>{s.name}</span>
+                  </LegendItem>
+                ))
+              : chart.labels.slice(0, 8).map((label, index) => (
+                  <LegendItem key={`${label}-${index}`}>
+                    <LegendSwatch
+                      $color={SERIES_COLORS[index % SERIES_COLORS.length]}
+                    />
+                    <span>{label}</span>
+                  </LegendItem>
+                ))}
           </ChartLegend>
         )}
       </ChartWithLegend>
@@ -183,6 +203,13 @@ function ChartEditorForm({
   const [rangeDraft, setRangeDraft] = useState(chart.range)
   const [xLabelDraft, setXLabelDraft] = useState(chart.xLabel ?? '')
   const [yLabelDraft, setYLabelDraft] = useState(chart.yLabel ?? '')
+
+  useEffect(() => {
+    setTitleDraft(chart.title)
+    setRangeDraft(chart.range)
+    setXLabelDraft(chart.xLabel ?? '')
+    setYLabelDraft(chart.yLabel ?? '')
+  }, [chart.id, chart.title, chart.range, chart.xLabel, chart.yLabel])
 
   const legend = chart.legend ?? (isRadial(chart.type) ? 'right' : 'none')
 
@@ -387,82 +414,273 @@ export function MiniChart({
   if (chart.type === 'scatter') {
     return <ScatterChart chart={chart} width={width} height={height} />
   }
-  const max = Math.max(...chart.values, 1)
-  const points = chart.values.map((value, index) => {
-    const x =
-      chart.values.length <= 1
-        ? width / 2
-        : 18 + (index / (chart.values.length - 1)) * (width - 36)
-    const y = height - 16 - (value / max) * (height - 28)
-    return { x, y, value, label: chart.labels[index] ?? `${index + 1}` }
-  })
+  const series = chartSeriesOf(chart)
+  const count = Math.max(chart.labels.length, chart.values.length, 1)
   const showAxisText = chart.showAxes !== false
-  if (chart.type === 'line' || chart.type === 'area') {
-    const linePoints = points.map(point => `${point.x},${point.y}`).join(' ')
+
+  if (chart.type === 'horizontal-bar') {
+    const allVals = series.flatMap(s => s.values)
+    const max = Math.max(...allVals, 1)
+    const labelPad = Math.min(72, Math.round(width * 0.28))
+    const rowH = Math.max(10, (height - 12) / count)
+    const barH = Math.max(4, Math.min(18, (rowH - 4) / series.length))
     return (
-      <ChartSvg
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={chart.title}
-      >
-        {chart.type === 'area' && points.length > 1 && (
-          <polygon
-            fill="#377d5a"
-            opacity="0.18"
-            points={`${points[0].x},${height - 16} ${linePoints} ${
-              points[points.length - 1].x
-            },${height - 16}`}
-          />
-        )}
-        <polyline
-          fill="none"
-          stroke="#377d5a"
-          strokeWidth="3"
-          points={linePoints}
-        />
-        {points.map(point => (
-          <g key={`${point.label}-${point.x}`}>
-            <circle cx={point.x} cy={point.y} r="4" fill="#377d5a" />
-            {showAxisText && (
-              <text x={point.x} y={height - 2} textAnchor="middle">
-                {point.label}
-              </text>
-            )}
-          </g>
-        ))}
+      <ChartSvg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+        {chart.labels.map((label, i) => {
+          const yBase = 6 + i * rowH
+          return (
+            <g key={`${label}-${i}`}>
+              {showAxisText && (
+                <text x={labelPad - 4} y={yBase + rowH / 2 + 3} textAnchor="end">
+                  {label.slice(0, 10)}
+                </text>
+              )}
+              {series.map((s, si) => {
+                const val = s.values[i] ?? 0
+                const barW = Math.max(0, (Math.max(0, val) / max) * (width - labelPad - 12))
+                const color = s.color ?? SERIES_COLORS[si % SERIES_COLORS.length]
+                return (
+                  <rect
+                    key={`${s.name}-${i}`}
+                    x={labelPad}
+                    y={yBase + si * barH + 1}
+                    width={barW}
+                    height={Math.max(2, barH - 1)}
+                    rx="2"
+                    fill={color}
+                  >
+                    <title>{`${label} · ${s.name}: ${val}`}</title>
+                  </rect>
+                )
+              })}
+            </g>
+          )
+        })}
       </ChartSvg>
     )
   }
-  // bar
-  const barWidth = Math.max(
-    14,
-    Math.min(34, (width - 32) / Math.max(points.length, 1) - 8),
-  )
-  return (
-    <ChartSvg
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label={chart.title}
-    >
-      {points.map(point => {
-        // Measure the bar from the same baseline the point `y` uses
-        // (height - 16); the old `height - 18` was 2px lower, so tiny/zero
-        // bars produced a slightly negative height and an invalid <rect>.
-        // Clamp keeps negative data values from re-introducing it.
-        const barHeight = Math.max(0, height - 16 - point.y)
-        return (
-          <g key={`${point.label}-${point.x}`}>
+
+  if (chart.type === 'stacked-bar') {
+    const totals = Array.from({ length: count }, (_, i) =>
+      series.reduce((sum, s) => sum + Math.max(0, s.values[i] ?? 0), 0),
+    )
+    const max = Math.max(...totals, 1)
+    const plotH = height - 28
+    const baseY = height - 16
+    const barWidth = Math.max(14, Math.min(34, (width - 32) / count - 8))
+    return (
+      <ChartSvg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+        {Array.from({ length: count }, (_, i) => {
+          const x = count <= 1 ? width / 2 : 24 + (i / (count - 1)) * (width - 48)
+          let acc = 0
+          return (
+            <g key={`stack-${i}`}>
+              {series.map((s, si) => {
+                const val = Math.max(0, s.values[i] ?? 0)
+                const segH = (val / max) * plotH
+                const y = baseY - ((acc + val) / max) * plotH
+                acc += val
+                const color = s.color ?? SERIES_COLORS[si % SERIES_COLORS.length]
+                return (
+                  <rect
+                    key={`${s.name}-${i}`}
+                    x={x - barWidth / 2}
+                    y={y}
+                    width={barWidth}
+                    height={Math.max(0, segH)}
+                    fill={color}
+                  >
+                    <title>{`${chart.labels[i] ?? i + 1} · ${s.name}: ${val}`}</title>
+                  </rect>
+                )
+              })}
+              {showAxisText && (
+                <text x={x} y={height - 2} textAnchor="middle">
+                  {chart.labels[i] ?? `${i + 1}`}
+                </text>
+              )}
+            </g>
+          )
+        })}
+      </ChartSvg>
+    )
+  }
+
+  const allVals = series.flatMap(s => s.values)
+  const minValue = Math.min(...allVals, 0)
+  const maxValue = Math.max(...allVals, 0)
+  const span = Math.max(maxValue - minValue, 1e-9)
+  const plotH = height - 28
+  const baseY = height - 16
+  const yForValue = (value: number): number =>
+    baseY - ((value - minValue) / span) * plotH
+  const zeroY = yForValue(0)
+  const xFor = (i: number) =>
+    count <= 1 ? width / 2 : 22 + (i / (count - 1)) * (width - 44)
+
+  if (chart.type === 'line' || chart.type === 'area') {
+    return (
+      <ChartSvg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+        {minValue < 0 && (
+          <line
+            x1={12}
+            y1={zeroY}
+            x2={width - 12}
+            y2={zeroY}
+            stroke="#c7cfc0"
+            strokeDasharray="3 2"
+          />
+        )}
+        {series.map((s, si) => {
+          const color = s.color ?? SERIES_COLORS[si % SERIES_COLORS.length]
+          const pts = s.values.map((v, i) => ({
+            x: xFor(i),
+            y: yForValue(v),
+            v,
+            label: chart.labels[i] ?? `${i + 1}`,
+          }))
+          const poly = pts.map(p => `${p.x},${p.y}`).join(' ')
+          return (
+            <g key={s.name}>
+              {chart.type === 'area' && pts.length > 1 && (
+                <polygon
+                  fill={color}
+                  opacity="0.16"
+                  points={`${pts[0].x},${zeroY} ${poly} ${pts[pts.length - 1].x},${zeroY}`}
+                />
+              )}
+              <polyline fill="none" stroke={color} strokeWidth="2.5" points={poly} />
+              {pts.map(p => (
+                <circle key={`${s.name}-${p.x}`} cx={p.x} cy={p.y} r="3.5" fill={color}>
+                  <title>{`${p.label} · ${s.name}: ${p.v}`}</title>
+                </circle>
+              ))}
+            </g>
+          )
+        })}
+        {showAxisText &&
+          chart.labels.map((label, i) => (
+            <text key={`${label}-${i}`} x={xFor(i)} y={height - 2} textAnchor="middle">
+              {label}
+            </text>
+          ))}
+      </ChartSvg>
+    )
+  }
+
+  if (chart.type === 'combo' && series.length >= 2) {
+    const barSeries = series[0]
+    const lineSeries = series.slice(1)
+    const barW = Math.max(12, Math.min(30, (width - 40) / count - 8))
+    return (
+      <ChartSvg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+        {minValue < 0 && (
+          <line
+            x1={12}
+            y1={zeroY}
+            x2={width - 12}
+            y2={zeroY}
+            stroke="#c7cfc0"
+            strokeDasharray="3 2"
+          />
+        )}
+        {barSeries.values.map((v, i) => {
+          const x = xFor(i)
+          const y = yForValue(v)
+          const rectY = v >= 0 ? y : zeroY
+          return (
             <rect
-              x={point.x - barWidth / 2}
-              y={point.y}
-              width={barWidth}
-              height={barHeight}
-              rx="3"
-              fill="#377d5a"
-            />
+              key={`cb-${i}`}
+              x={x - barW / 2}
+              y={rectY}
+              width={barW}
+              height={Math.max(0, Math.abs(zeroY - y))}
+              rx="2"
+              fill={barSeries.color ?? SERIES_COLORS[0]}
+              opacity="0.85"
+            >
+              <title>{`${chart.labels[i] ?? i + 1} · ${barSeries.name}: ${v}`}</title>
+            </rect>
+          )
+        })}
+        {lineSeries.map((s, si) => {
+          const color = s.color ?? SERIES_COLORS[(si + 1) % SERIES_COLORS.length]
+          const pts = s.values.map((v, i) => ({
+            x: xFor(i),
+            y: yForValue(v),
+            v,
+          }))
+          return (
+            <g key={`cl-${s.name}`}>
+              <polyline
+                fill="none"
+                stroke={color}
+                strokeWidth="2.5"
+                points={pts.map(p => `${p.x},${p.y}`).join(' ')}
+              />
+              {pts.map((p, i) => (
+                <circle key={i} cx={p.x} cy={p.y} r="3.5" fill={color}>
+                  <title>{`${chart.labels[i] ?? i + 1} · ${s.name}: ${p.v}`}</title>
+                </circle>
+              ))}
+            </g>
+          )
+        })}
+        {showAxisText &&
+          chart.labels.map((label, i) => (
+            <text key={`${label}-${i}`} x={xFor(i)} y={height - 2} textAnchor="middle">
+              {label}
+            </text>
+          ))}
+      </ChartSvg>
+    )
+  }
+
+  // Grouped bar (single or multi-series)
+  const groupWidth = Math.max(14, Math.min(40, (width - 36) / count - 6))
+  const barWidth = Math.max(4, groupWidth / series.length - (series.length > 1 ? 1 : 0))
+  return (
+    <ChartSvg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+      {minValue < 0 && (
+        <line
+          x1={12}
+          y1={zeroY}
+          x2={width - 12}
+          y2={zeroY}
+          stroke="#c7cfc0"
+          strokeDasharray="3 2"
+        />
+      )}
+      {Array.from({ length: count }, (_, i) => {
+        const cx = xFor(i)
+        const startX = cx - groupWidth / 2
+        const label = chart.labels[i] ?? `${i + 1}`
+        return (
+          <g key={`${label}-${i}`}>
+            {series.map((s, si) => {
+              const v = s.values[i] ?? 0
+              const y = yForValue(v)
+              const rectY = v >= 0 ? y : zeroY
+              const barHeight = Math.max(0, Math.abs(zeroY - y))
+              const baseColor = s.color ?? SERIES_COLORS[si % SERIES_COLORS.length]
+              const color = series.length === 1 && v < 0 ? '#a8385a' : baseColor
+              return (
+                <rect
+                  key={`${s.name}-${i}`}
+                  x={startX + si * (barWidth + (series.length > 1 ? 1 : 0))}
+                  y={rectY}
+                  width={barWidth}
+                  height={barHeight}
+                  rx="2"
+                  fill={color}
+                >
+                  <title>{`${label} · ${s.name}: ${v}`}</title>
+                </rect>
+              )
+            })}
             {showAxisText && (
-              <text x={point.x} y={height - 2} textAnchor="middle">
-                {point.label}
+              <text x={cx} y={height - 2} textAnchor="middle">
+                {label}
               </text>
             )}
           </g>

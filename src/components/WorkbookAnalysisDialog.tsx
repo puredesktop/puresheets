@@ -3,7 +3,9 @@ import styled from 'styled-components'
 import { Button } from '@purescience/platform-ui/components/common/buttons/Button'
 import {
   applyRows, auditFormula, cleanedRows, goalSeek, pivotRows, readSelection, selectionFields, traceFormulaErrors,
+  type AnalysisPivotSummary,
 } from '../lib/workbookAnalysis'
+import { computePivotSourceSignature } from '../lib/pivotEngine'
 import { validRangeName } from '../lib/rangeNames'
 import {
   addSheet, cellKey, cloneWithUpdatedSheet, computedCellValue, isFormulaError, parseCellKey, rangesIntersect, upsertCell,
@@ -58,15 +60,18 @@ export function WorkbookAnalysisDialog(props: Props): React.ReactElement {
 function TableTool({ mode, document, sheet, range, onApply }: Props): React.ReactElement {
   const pivot = mode === 'pivot' ? sheet.pivot : undefined
   const source = pivot ? document.workbook.sheets.find(sheet => sheet.id === pivot.sourceSheetId) : sheet
-  const [sourceRange, setSourceRange] = useState(pivot?.range ?? range)
+  const baseColumn = parseCellKey((pivot?.sourceRange ?? range).split(':')[0])?.column ?? 0
+  const [sourceRange, setSourceRange] = useState(pivot?.sourceRange ?? range)
   const [cleanup, setCleanup] = useState<'dedupe' | 'split'>('dedupe')
   const [separator, setSeparator] = useState(',')
   const [header, setHeader] = useState(true)
   const [excluded, setExcluded] = useState<number[]>([])
-  const [row, setRow] = useState(pivot?.row ?? 0)
-  const [column, setColumn] = useState(pivot?.column ?? -1)
-  const [value, setValue] = useState(pivot?.value ?? 1)
-  const [summary, setSummary] = useState<PivotDefinition['summary']>(pivot?.summary ?? 'sum')
+  const [row, setRow] = useState(pivot?.rows[0] ? Math.max(0, pivot.rows[0].columnIndex - baseColumn) : 0)
+  const [column, setColumn] = useState(pivot?.columns[0] ? Math.max(0, pivot.columns[0].columnIndex - baseColumn) : -1)
+  const [value, setValue] = useState(pivot?.values[0] ? Math.max(0, pivot.values[0].columnIndex - baseColumn) : 1)
+  const initialSummary: AnalysisPivotSummary =
+    pivot?.values[0]?.aggregate === 'avg' ? 'average' : pivot?.values[0]?.aggregate === 'count' ? 'count' : 'sum'
+  const [summary, setSummary] = useState<AnalysisPivotSummary>(initialSummary)
   const [preview, setPreview] = useState<SheetCell[][] | null>(null)
   const [problem, setProblem] = useState('')
   const selection = useMemo(() => {
@@ -90,7 +95,7 @@ function TableTool({ mode, document, sheet, range, onApply }: Props): React.Reac
     } catch (cause) { setPreview(null); setProblem(String((cause as Error).message)) }
   }
   const commit = () => {
-    if (!preview || !source) return
+    if (!preview || !source || !selection) return
     try {
       if (mode === 'cleanup') {
         const next = addSheet(document, uniqueSheetName(document, 'Cleaned data'))
@@ -100,16 +105,31 @@ function TableTool({ mode, document, sheet, range, onApply }: Props): React.Reac
       }
       const base = pivot ? document : addSheet(document, uniqueSheetName(document, 'Pivot'))
       const output = pivot ? sheet : base.workbook.sheets.at(-1)!
+      const outputCell = pivot?.output ?? 'A1'
       if (pivot && source.id === output.id) {
-        const origin = parseCellKey(pivot.output)!
-        const after = cellKey(origin.row + Math.max(preview.length, pivot.rows) - 1, origin.column + Math.max(preview[0].length, pivot.columns) - 1)
-        if (rangesIntersect(sourceRange, `${pivot.output}:${after}`))
+        const origin = parseCellKey(outputCell)!
+        const after = cellKey(origin.row + Math.max(preview.length, pivot.outputRows ?? preview.length) - 1, origin.column + Math.max(preview[0].length, pivot.outputColumns ?? preview[0].length) - 1)
+        if (rangesIntersect(sourceRange, `${outputCell}:${after}`))
           throw new Error('The source range overlaps the pivot output. Choose a different source range.')
       }
-      const result = applyRows(output, preview, pivot?.output, pivot)
+      const result = applyRows(output, preview, outputCell, pivot)
+      const colOffset = selection.first.column
       const definition: PivotDefinition = {
-        sourceSheetId: source.id, range: sourceRange, row, column: column < 0 ? null : column,
-        value, summary, output: pivot?.output ?? 'A1', rows: preview.length, columns: preview[0].length,
+        id: pivot?.id ?? `pivot-${Date.now()}`,
+        sourceSheetId: source.id,
+        sourceRange,
+        rows: [{ columnIndex: colOffset + row, label: fields[row] ?? `Column ${row + 1}` }],
+        columns: column < 0 ? [] : [{ columnIndex: colOffset + column, label: fields[column] ?? `Column ${column + 1}` }],
+        values: [{
+          columnIndex: colOffset + value,
+          label: fields[value] ?? `Column ${value + 1}`,
+          aggregate: summary === 'average' ? 'avg' : summary,
+        }],
+        refreshedAt: new Date().toISOString(),
+        sourceSignature: computePivotSourceSignature(source, sourceRange, document.workbook),
+        output: outputCell,
+        outputRows: preview.length,
+        outputColumns: preview[0].length,
       }
       onApply(cloneWithUpdatedSheet(base, { ...result, pivot: definition }), pivot ? 'Updated pivot table' : 'Created pivot table')
     } catch (cause) { setProblem(String((cause as Error).message)) }
@@ -210,7 +230,13 @@ function Names({ document, sheet, range, onApply, onNavigate }: Props): React.Re
   return <div className="body">
     <form onSubmit={event => {
       event.preventDefault()
-      if (validRangeName(key)) save([...names.filter(entry => entry !== existing), { name: key, sheetId: sheet.id, range }], `Saved named range ${key}`)
+      if (validRangeName(key)) save([...names.filter(entry => entry !== existing), {
+        id: existing?.id ?? `nr-${Date.now()}`,
+        name: key,
+        sheetId: sheet.id,
+        range,
+        ...(existing?.comment ? { comment: existing.comment } : {}),
+      }], `Saved named range ${key}`)
     }}>
       <label>Name for {sheet.name}!{range}<input value={name} onChange={event => setName(event.target.value)} placeholder="TaxRate" /></label>
       <Button variant="primary" type="submit" disabled={!validRangeName(key)}>{existing ? 'Update name to this range' : 'Save name'}</Button>

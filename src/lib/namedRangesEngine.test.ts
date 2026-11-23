@@ -13,7 +13,7 @@ import { cloneWithUpdatedSheet, createBlankWorkbook, upsertCell } from './workbo
 it('calculates a workbook-scoped named range in the live Univer engine', async () => {
   const base = createBlankWorkbook()
   const sheet = upsertCell(upsertCell(upsertCell(base.workbook.sheets[0], 'A1', '10'), 'A2', '20'), 'B1', '=SUM(Revenue)')
-  const document = cloneWithUpdatedSheet({ ...base, workbook: { ...base.workbook, namedRanges: [{ name: 'Revenue', sheetId: sheet.id, range: 'A1:A2' }] } }, sheet)
+  const document = cloneWithUpdatedSheet({ ...base, workbook: { ...base.workbook, namedRanges: [{ id: 'nr-rev', name: 'Revenue', sheetId: sheet.id, range: 'A1:A2' }] } }, sheet)
   const univer = new Univer({ locale: LocaleType.EN_US })
   try {
     univer.registerPlugin(UniverFormulaEnginePlugin)

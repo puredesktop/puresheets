@@ -2,8 +2,8 @@ import JSZip from 'jszip'
 import { SaxesParser } from 'saxes'
 import { cellKey, computedCellValue, displayCellValue, parseCellKey, rangesIntersect, type FormulaWorkbook } from './workbookModel'
 import { parseQualifiedRange, qualifiedRange, validRangeName } from './rangeNames'
-import { normalizePivot } from './workbookAnalysis'
-import type { NamedRange, WorkbookChart, WorkbookSheet } from '../types'
+import { normalizePivotDefinition } from './sheetMetadataNormalize'
+import type { NamedRange, PivotAggregate, WorkbookChart, WorkbookSheet } from '../types'
 
 const relNs = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 const drawingNs = 'http://schemas.openxmlformats.org/drawingml/2006'
@@ -86,7 +86,7 @@ export function importRangeNames(workbook: Element | undefined, sheets: Workbook
     const sheet = ref && sheets.find(sheet => sheet.name.toLowerCase() === ref.sheet.toLowerCase())
     const key = name.toUpperCase()
     if (entry.attrs.localSheetId !== undefined || !validRangeName(name) || !ref || !sheet || seen.has(key)) { skipped++; continue }
-    names.push({ name, sheetId: sheet.id, range: ref.range })
+    names.push({ id: `nr-xlsx-${names.length + 1}`, name, sheetId: sheet.id, range: ref.range })
     seen.add(key)
   }
   return { names, skipped }
@@ -181,7 +181,13 @@ async function importPivot(parts: Awaited<ReturnType<typeof readWorkbookParts>>,
   if (!def || row.length !== 1 || col.length > 1 || data.length !== 1 ||
     child(def, 'pageFields') || child(def, 'filters') || fields.some(field => children(child(field, 'items'), 'item').some(item => item.attrs.h === '1'))) return
   const summary = data[0].attrs.subtotal ?? 'sum'
-  const functionKind = summary === 'avg' ? 'average' : summary
+  const aggregate: PivotAggregate | undefined =
+    summary === 'avg' || summary === 'average'
+      ? 'avg'
+      : summary === 'sum' || summary === 'count' || summary === 'min' || summary === 'max'
+      ? summary
+      : undefined
+  if (!aggregate) return
   const cachePath = (await relationships(parts.zip, path)).find(rel => rel.type === 'pivotCacheDefinition')?.path ?? parts.cacheRelations.get(def.attrs.cacheId)
   const cache = await part(parts.zip, cachePath)
   const source = child(child(cache, 'cacheSource'), 'worksheetSource')
@@ -189,11 +195,30 @@ async function importPivot(parts: Awaited<ReturnType<typeof readWorkbookParts>>,
   const range = source?.attrs.ref
   const outputRange = child(def, 'location')?.attrs.ref
   const [origin, end = origin] = (outputRange ?? '').split(':').map(parseCellKey)
-  if (!range || !input || !origin || !end || !outputRange) return
-  const result = normalizePivot({
-    sourceSheetId: input.id, range, row: Number(row[0].attrs.x), column: col.length ? Number(col[0].attrs.x) : null,
-    value: Number(data[0].attrs.fld), summary: functionKind, output: outputRange.split(':')[0],
-    rows: end.row - origin.row + 1, columns: end.column - origin.column + 1,
+  const sourceOrigin = range ? parseCellKey(range.split(':')[0]) : null
+  const rowIndex = Number(row[0].attrs.x)
+  const colIndex = col.length ? Number(col[0].attrs.x) : null
+  const valueIndex = Number(data[0].attrs.fld)
+  if (!range || !input || !origin || !end || !outputRange || !sourceOrigin ||
+    !Number.isInteger(rowIndex) || rowIndex < 0 ||
+    !Number.isInteger(valueIndex) || valueIndex < 0 ||
+    (colIndex !== null && (!Number.isInteger(colIndex) || colIndex < 0))) return
+  const rowsCount = end.row - origin.row + 1
+  const colsCount = end.column - origin.column + 1
+  if (rowsCount < 1 || colsCount < 1 || rowsCount * colsCount > 25_000) return
+  const headerOf = (offset: number) =>
+    input.cells[cellKey(sourceOrigin.row, sourceOrigin.column + offset)]?.value.trim() || `Column ${offset + 1}`
+  const result = normalizePivotDefinition({
+    id: `pivot-xlsx-${path.replace(/[^A-Za-z0-9_-]/g, '-')}`,
+    sourceSheetId: input.id,
+    sourceRange: range,
+    rows: [{ columnIndex: sourceOrigin.column + rowIndex, label: headerOf(rowIndex) }],
+    columns: colIndex !== null ? [{ columnIndex: sourceOrigin.column + colIndex, label: headerOf(colIndex) }] : [],
+    values: [{ columnIndex: sourceOrigin.column + valueIndex, label: headerOf(valueIndex), aggregate }],
+    refreshedAt: new Date().toISOString(),
+    output: outputRange.split(':')[0],
+    outputRows: rowsCount,
+    outputColumns: colsCount,
   })
   if (result && input.id === sheet.id && rangesIntersect(range, outputRange)) return
   return result

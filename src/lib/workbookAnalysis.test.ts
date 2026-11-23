@@ -27,7 +27,21 @@ it('groups and updates a saved pivot without replacing an adjacent occupied cell
   expect(rows[1][1].value).toBe('250')
   const added = addSheet(doc, 'Pivot')
   const output = applyRows(added.workbook.sheets.at(-1)!, rows)
-  const saved = cloneWithUpdatedSheet(added, { ...output, pivot: { sourceSheetId: sheet.id, range: 'A1:B4', row: 0, column: null, value: 1, summary: 'sum', output: 'A1', rows: 3, columns: 2 } })
+  const saved = cloneWithUpdatedSheet(added, {
+    ...output,
+    pivot: {
+      id: 'pivot-1',
+      sourceSheetId: sheet.id,
+      sourceRange: 'A1:B4',
+      rows: [{ columnIndex: 0, label: 'Region' }],
+      columns: [],
+      values: [{ columnIndex: 1, label: 'Revenue', aggregate: 'sum' }],
+      refreshedAt: new Date().toISOString(),
+      output: 'A1',
+      outputRows: 3,
+      outputColumns: 2,
+    },
+  })
   const loaded = loadSheetsDocument(serializeSheetsDocument(saved)).workbook.sheets[1]
   expect(loaded.pivot?.sourceSheetId).toBe(sheet.id)
   expect(loaded.cells.B2.value).toBe('250')
@@ -39,7 +53,7 @@ describe('auditing and Goal Seek', () => {
     const { doc, sheet } = workbookWith({ A1: '10' })
     const next = addSheet(doc, 'Forecast')
     const forecast = upsertCell(next.workbook.sheets[1], 'B2', '=IF(TRUE,TaxRate,"A8")')
-    const workbook = { ...next.workbook, sheets: [sheet, forecast], namedRanges: [{ name: 'TaxRate', range: 'A1', sheetId: sheet.id }] }
+    const workbook = { ...next.workbook, sheets: [sheet, forecast], namedRanges: [{ id: 'nr-tax', name: 'TaxRate', range: 'A1', sheetId: sheet.id }] }
     expect(auditFormula(workbook, forecast, 'B2').precedents).toEqual([{ sheetId: sheet.id, range: 'A1' }])
     expect(auditFormula(workbook, sheet, 'A1').dependents).toEqual([{ sheetId: forecast.id, range: 'B2' }])
   })

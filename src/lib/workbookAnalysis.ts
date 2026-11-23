@@ -80,16 +80,25 @@ function splitText(value: string, delimiter: string): string[] {
   return cells
 }
 
-export function applyRows(sheet: WorkbookSheet, rows: SheetCell[][], at = 'A1', previous?: { rows: number; columns: number }): WorkbookSheet {
+export type AnalysisPivotSummary = 'sum' | 'count' | 'average'
+
+export function applyRows(
+  sheet: WorkbookSheet,
+  rows: SheetCell[][],
+  at = 'A1',
+  previous?: { rows: number; columns: number } | Pick<PivotDefinition, 'outputRows' | 'outputColumns'>,
+): WorkbookSheet {
   const origin = parseCellKey(at)
   if (!origin) throw new Error('Enter a valid output cell.')
   const width = Math.max(0, ...rows.map(row => row.length))
   if (!width || origin.column + width > 16_384 || origin.row + rows.length > 1_048_576)
     throw new Error('The result does not fit on this sheet.')
   const cells = { ...sheet.cells }
-  const owned = (r: number, c: number) => !!previous && r < previous.rows && c < previous.columns
-  for (let r = 0; r < Math.max(rows.length, previous?.rows ?? 0); r++) {
-    for (let c = 0; c < Math.max(width, previous?.columns ?? 0); c++) {
+  const prevRows = !previous ? 0 : 'outputRows' in previous ? (previous.outputRows ?? 0) : ('rows' in previous && typeof previous.rows === 'number' ? previous.rows : 0)
+  const prevColumns = !previous ? 0 : 'outputColumns' in previous ? (previous.outputColumns ?? 0) : ('columns' in previous && typeof previous.columns === 'number' ? previous.columns : 0)
+  const owned = (r: number, c: number) => prevRows > 0 && prevColumns > 0 && r < prevRows && c < prevColumns
+  for (let r = 0; r < Math.max(rows.length, prevRows); r++) {
+    for (let c = 0; c < Math.max(width, prevColumns); c++) {
       if (!(r < rows.length && c < width) && !owned(r, c)) continue
       const key = cellKey(origin.row + r, origin.column + c)
       if (isCellLocked(sheet, key)) throw new Error(`${key} is protected.`)
@@ -102,7 +111,10 @@ export function applyRows(sheet: WorkbookSheet, rows: SheetCell[][], at = 'A1', 
   return { ...sheet, cells, rowCount: Math.max(sheet.rowCount, origin.row + rows.length), columnCount: Math.max(sheet.columnCount, origin.column + width) }
 }
 
-export function pivotRows(selection: ReturnType<typeof readSelection>, options: Pick<PivotDefinition, 'row' | 'column' | 'value' | 'summary'>): SheetCell[][] {
+export function pivotRows(
+  selection: ReturnType<typeof readSelection>,
+  options: { row: number; column: number | null; value: number; summary: AnalysisPivotSummary },
+): SheetCell[][] {
   const [header, ...body] = selection.rows
   const { row, column, value, summary } = options
   if (!header[row] || !header[value] || (column !== null && (!header[column] || column === row)) || !body.length)
@@ -141,15 +153,14 @@ export function pivotRows(selection: ReturnType<typeof readSelection>, options: 
   ]
 }
 
-export function normalizePivot(input: unknown): PivotDefinition | undefined {
-  if (!input || typeof input !== 'object') return
-  const item = input as Partial<PivotDefinition>
-  const index = (value: unknown): value is number => Number.isInteger(value) && Number(value) >= 0
-  if (typeof item.sourceSheetId !== 'string' || typeof item.range !== 'string' || !normalizeRangeToken(item.range) ||
-    typeof item.output !== 'string' || !parseCellKey(item.output) || !index(item.row) || !index(item.value) ||
-    (item.column !== null && !index(item.column)) || !index(item.rows) || !index(item.columns) ||
-    item.rows < 1 || item.columns < 1 || item.rows * item.columns > MAX_ANALYSIS_CELLS || !['sum', 'count', 'average'].includes(item.summary ?? '')) return
-  return item as PivotDefinition
+export function normalizePivotBounds(
+  input: { output?: string; outputRows?: number; outputColumns?: number },
+): { output: string; outputRows: number; outputColumns: number } | undefined {
+  const index = (value: unknown): value is number => Number.isInteger(value) && Number(value) >= 1
+  if (typeof input.output !== 'string' || !parseCellKey(input.output) ||
+    !index(input.outputRows) || !index(input.outputColumns) ||
+    input.outputRows * input.outputColumns > MAX_ANALYSIS_CELLS) return
+  return { output: input.output.trim().toUpperCase(), outputRows: input.outputRows, outputColumns: input.outputColumns }
 }
 
 type CellReference = { sheetId: string; range: string }

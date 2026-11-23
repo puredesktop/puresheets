@@ -1,5 +1,8 @@
-import { expandRangeNames } from './rangeNames'
 import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
+import { MAX_SHEET_COLUMNS, MAX_SHEET_ROWS } from './sheetMetadataNormalize'
+import { extractChartData } from './chartEngine'
+import { resolveNamedRangesInFormula } from './formulaCatalog'
+import { visibleRowsWithFilters } from './dataTransforms'
 import type {
   AgentCellChange,
   AgentLogCellChange,
@@ -11,7 +14,9 @@ import type {
   WorkbookChart,
   WorkbookSheet,
 } from '../types'
-import { withFreshUniverSnapshot } from './univerAdapter'
+import { createWorkbookUnitId, withFreshUniverSnapshot } from './univerAdapter'
+
+const MAX_RANGE_EXPANSION_CELLS = 50_000
 
 const columnLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 let sheetIdCounter = 1
@@ -24,6 +29,7 @@ export function createBlankWorkbook(title = 'Untitled'): PureSheetsDocument {
     version: 1,
     engine: {
       name: 'univer',
+      snapshot: { id: createWorkbookUnitId() },
     },
     metadata: {
       title,
@@ -62,6 +68,49 @@ export function addSheet(
   })
 }
 
+/**
+ * Rewrite sheet-qualified references (Costs!A1, 'Q1/Q2'!A1) in a formula
+ * according to a rename map (`oldName -> newName`), leaving double-quoted
+ * string literals untouched.
+ */
+export function renameSheetReferences(
+  formula: string,
+  names: Map<string, string>,
+): string {
+  const renamed = new Map(
+    [...names]
+      .filter(([from, to]) => from !== to)
+      .map(([from, to]) => [from.toLowerCase(), to]),
+  )
+  if (!renamed.size) return formula
+  const needsQuotes = (name: string): boolean => {
+    if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name)) return true
+    if (/^(?:TRUE|FALSE)$/i.test(name)) return true
+    // Cell-address-like sheet names (Q1, A1, FY2025, R1C1) must be single-quoted.
+    if (/^[A-Za-z]{1,3}[1-9][0-9]*$/i.test(name)) return true
+    if (/^R\d+C\d+$/i.test(name)) return true
+    return false
+  }
+  const quote = (name: string) =>
+    needsQuotes(name) ? `'${name.replace(/'/g, "''")}'` : name
+  return formula
+    .split(/("(?:[^"]|"")*")/)
+    .map((part, index) =>
+      index % 2 === 1
+        ? part
+        : part.replace(
+            /'((?:[^']|'')+)'!|(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.]*)!/g,
+            (whole, quoted?: string, bare?: string) => {
+              const name =
+                quoted !== undefined ? quoted.replace(/''/g, "'") : bare ?? ''
+              const target = renamed.get(name.toLowerCase())
+              return target ? `${quote(target)}!` : whole
+            },
+          ),
+    )
+    .join('')
+}
+
 export function renameSheet(
   document: PureSheetsDocument,
   sheetId: string,
@@ -69,13 +118,30 @@ export function renameSheet(
 ): PureSheetsDocument {
   const trimmed = name.trim()
   if (!trimmed) return document
+  const existing = document.workbook.sheets.find(sheet => sheet.id === sheetId)
+  if (!existing) return document
+  if (existing.name === trimmed) return document
+  if (
+    document.workbook.sheets.some(
+      sheet =>
+        sheet.id !== sheetId &&
+        sheet.name.toLowerCase() === trimmed.toLowerCase(),
+    )
+  ) {
+    return document
+  }
+  const renameMap = new Map([[existing.name, trimmed]])
   return touchDocument({
     ...document,
     workbook: {
       ...document.workbook,
-      sheets: document.workbook.sheets.map(sheet =>
-        sheet.id === sheetId ? { ...sheet, name: trimmed } : sheet,
-      ),
+      sheets: document.workbook.sheets.map(sheet => ({
+        ...sheet,
+        name: sheet.id === sheetId ? trimmed : sheet.name,
+        cells: adjustFormulaCells(sheet.cells, formula =>
+          renameSheetReferences(formula, renameMap),
+        ),
+      })),
     },
   })
 }
@@ -86,10 +152,21 @@ export function duplicateSheet(
 ): PureSheetsDocument {
   const source = document.workbook.sheets.find(sheet => sheet.id === sheetId)
   if (!source) return document
+  const existingNames = new Set(
+    document.workbook.sheets.map(sheet => sheet.name.toLowerCase()),
+  )
+  let copyName = `${source.name} copy`
+  if (existingNames.has(copyName.toLowerCase())) {
+    let suffix = 2
+    while (existingNames.has(`${source.name} copy ${suffix}`.toLowerCase())) {
+      suffix += 1
+    }
+    copyName = `${source.name} copy ${suffix}`
+  }
   const copy: WorkbookSheet = {
     ...source,
     id: nextSheetId(),
-    name: `${source.name} copy`,
+    name: copyName,
     // A duplicate is an ordinary sheet — it must not claim to be an agent
     // draft of the original's source (QA operations only track the original).
     agentDraft: undefined,
@@ -100,6 +177,22 @@ export function duplicateSheet(
         { ...cell, style: cell.style ? { ...cell.style } : undefined },
       ]),
     ),
+    columnWidths: source.columnWidths ? { ...source.columnWidths } : undefined,
+    rowHeights: source.rowHeights ? { ...source.rowHeights } : undefined,
+    merges: source.merges ? [...source.merges] : undefined,
+    comments: source.comments ? { ...source.comments } : undefined,
+    validations: source.validations?.map(rule => ({
+      ...rule,
+      options: rule.options ? [...rule.options] : undefined,
+    })),
+    protection: source.protection
+      ? { lockedRanges: [...source.protection.lockedRanges] }
+      : undefined,
+    conditionalFormats: source.conditionalFormats?.map(rule => ({
+      ...rule,
+      condition: { ...rule.condition },
+      style: { ...rule.style },
+    })),
     charts: source.charts?.map(chart => ({
       ...chart,
       id: nextChartId(),
@@ -110,8 +203,37 @@ export function duplicateSheet(
   return touchDocument({
     ...document,
     workbook: {
+      ...document.workbook,
       activeSheetId: copy.id,
       sheets: [...document.workbook.sheets, copy],
+    },
+  })
+}
+
+/** Reorder a visible sheet one step left or right among visible sheets. */
+export function moveSheet(
+  document: PureSheetsDocument,
+  sheetId: string,
+  direction: 'left' | 'right',
+): PureSheetsDocument {
+  const sheets = document.workbook.sheets
+  const visibleIndices = sheets
+    .map((sheet, index) => (sheet.agentDraft ? -1 : index))
+    .filter(index => index >= 0)
+  const visiblePos = visibleIndices.findIndex(idx => sheets[idx].id === sheetId)
+  if (visiblePos < 0) return document
+  const neighborPos = direction === 'left' ? visiblePos - 1 : visiblePos + 1
+  if (neighborPos < 0 || neighborPos >= visibleIndices.length) return document
+  const fromIndex = visibleIndices[visiblePos]
+  const toIndex = visibleIndices[neighborPos]
+  const nextSheets = [...sheets]
+  const [moved] = nextSheets.splice(fromIndex, 1)
+  nextSheets.splice(toIndex, 0, moved)
+  return touchDocument({
+    ...document,
+    workbook: {
+      ...document.workbook,
+      sheets: nextSheets,
     },
   })
 }
@@ -120,15 +242,21 @@ export function deleteSheet(
   document: PureSheetsDocument,
   sheetId: string,
 ): PureSheetsDocument {
-  if (document.workbook.sheets.length <= 1) return document
+  const target = document.workbook.sheets.find(sheet => sheet.id === sheetId)
+  if (!target) return document
+  const remainingVisible = document.workbook.sheets.filter(
+    sheet => sheet.id !== sheetId && !sheet.agentDraft,
+  )
+  if (!target.agentDraft && remainingVisible.length === 0) return document
   const sheets = document.workbook.sheets.filter(sheet => sheet.id !== sheetId)
+  if (sheets.length === 0) return document
   return touchDocument({
     ...document,
     workbook: {
       ...document.workbook,
       activeSheetId:
         document.workbook.activeSheetId === sheetId
-          ? sheets[0].id
+          ? (remainingVisible[0] ?? sheets[0]).id
           : document.workbook.activeSheetId,
       sheets,
     },
@@ -140,12 +268,31 @@ export function cellKey(row: number, column: number): string {
 }
 
 export function parseCellKey(key: string): CellPosition | null {
-  const match = /^([A-Z]+)([1-9][0-9]*)$/i.exec(key.trim())
+  const match = /^([A-Z]{1,3})([1-9][0-9]*)$/i.exec(key.trim())
   if (!match) return null
-  return {
-    row: Number(match[2]) - 1,
-    column: columnIndex(match[1].toUpperCase()),
+  const row = Number(match[2]) - 1
+  const column = columnIndex(match[1].toUpperCase())
+  if (
+    !Number.isSafeInteger(row) ||
+    row < 0 ||
+    row >= MAX_SHEET_ROWS ||
+    column < 0 ||
+    column >= MAX_SHEET_COLUMNS
+  ) {
+    return null
   }
+  return { row, column }
+}
+
+/** Public bounding-box parser for an A1 cell or A1:B2 range token (O(1)). */
+export function parseRangeBounds(
+  rangeToken: string,
+): { start: CellPosition; end: CellPosition } | null {
+  const trimmed = rangeToken.trim()
+  if (!trimmed) return null
+  const single = parseCellKey(trimmed.replace(/\$/g, ''))
+  if (single) return { start: single, end: single }
+  return parseRange(trimmed)
 }
 
 export function columnLabel(index: number): string {
@@ -217,19 +364,28 @@ export function upsertCell(
   // Protection (Phase S3): locked cells are never mutated at the model layer.
   if (isCellLocked(sheet, key)) return sheet
   const trimmed = value.trim()
-  const nextCells = { ...sheet.cells }
+  const existing = sheet.cells[key]
   if (!trimmed) {
+    if (!existing) return sheet
+    const nextCells = { ...sheet.cells }
     delete nextCells[key]
-  } else {
-    nextCells[key] = {
+    return { ...sheet, cells: nextCells }
+  }
+  const kind: CellValueKind = trimmed.startsWith('=')
+    ? 'formula'
+    : numberLike(trimmed)
+    ? 'number'
+    : 'text'
+  if (existing && existing.value === value && existing.kind === kind) {
+    return sheet
+  }
+  const nextCells = {
+    ...sheet.cells,
+    [key]: {
       value,
-      kind: trimmed.startsWith('=')
-        ? 'formula'
-        : numberLike(trimmed)
-        ? 'number'
-        : 'text',
-      style: sheet.cells[key]?.style,
-    }
+      kind,
+      style: existing?.style,
+    },
   }
   return {
     ...sheet,
@@ -241,16 +397,113 @@ export function clearRange(
   sheet: WorkbookSheet,
   rangeToken: string,
 ): WorkbookSheet {
-  const keys = cellsInRange(rangeToken)
-  if (!keys.length) return sheet
+  const bounds = parseRangeBounds(rangeToken)
+  if (!bounds) return sheet
+  let changed = false
   const nextCells = { ...sheet.cells }
-  for (const key of keys) {
+  for (const key of Object.keys(sheet.cells)) {
+    const pos = parseCellKey(key)
+    if (
+      !pos ||
+      pos.row < bounds.start.row ||
+      pos.row > bounds.end.row ||
+      pos.column < bounds.start.column ||
+      pos.column > bounds.end.column
+    ) {
+      continue
+    }
     if (isCellLocked(sheet, key)) continue
     delete nextCells[key]
+    changed = true
   }
+  if (!changed) return sheet
   return {
     ...sheet,
     cells: nextCells,
+  }
+}
+
+export function hasMergeInRange(
+  sheet: WorkbookSheet,
+  rangeToken: string,
+): boolean {
+  const bounds = parseRangeBounds(rangeToken)
+  if (!bounds || !sheet.merges?.length) return false
+  return sheet.merges.some(merge => {
+    const mergeBounds = parseRangeBounds(merge)
+    return Boolean(mergeBounds && boundsIntersect(bounds, mergeBounds))
+  })
+}
+
+export function mergeRange(
+  sheet: WorkbookSheet,
+  rangeToken: string,
+): WorkbookSheet {
+  const normalized = normalizeRangeToken(rangeToken)
+  const bounds = normalized ? parseRangeBounds(normalized) : null
+  if (!normalized || !bounds) return sheet
+  if (
+    bounds.start.row === bounds.end.row &&
+    bounds.start.column === bounds.end.column
+  ) {
+    return sheet
+  }
+  if (isRangeLocked(sheet, normalized)) return sheet
+  const existing = sheet.merges ?? []
+  if (existing.includes(normalized)) return sheet
+  const remaining = existing.filter(merge => {
+    const mergeBounds = parseRangeBounds(merge)
+    return !mergeBounds || !boundsIntersect(bounds, mergeBounds)
+  })
+  const topLeftKey = cellKey(bounds.start.row, bounds.start.column)
+  let cellsChanged = false
+  const nextCells = { ...sheet.cells }
+  for (const key of Object.keys(sheet.cells)) {
+    if (key === topLeftKey) continue
+    const pos = parseCellKey(key)
+    if (
+      !pos ||
+      pos.row < bounds.start.row ||
+      pos.row > bounds.end.row ||
+      pos.column < bounds.start.column ||
+      pos.column > bounds.end.column
+    ) {
+      continue
+    }
+    const cell = nextCells[key]
+    if (cell?.style) {
+      if (cell.value !== '' || cell.kind !== 'blank') {
+        nextCells[key] = { value: '', kind: 'blank', style: cell.style }
+        cellsChanged = true
+      }
+    } else {
+      delete nextCells[key]
+      cellsChanged = true
+    }
+  }
+  return {
+    ...sheet,
+    cells: cellsChanged ? nextCells : sheet.cells,
+    merges: [...remaining, normalized],
+  }
+}
+
+export function unmergeRange(
+  sheet: WorkbookSheet,
+  rangeToken: string,
+): WorkbookSheet {
+  const bounds = parseRangeBounds(rangeToken)
+  const existing = sheet.merges ?? []
+  if (!bounds || !existing.length) return sheet
+  if (isRangeLocked(sheet, rangeToken)) return sheet
+  const remaining = existing.filter(merge => {
+    const mergeBounds = parseRangeBounds(merge)
+    return !mergeBounds || !boundsIntersect(bounds, mergeBounds)
+  })
+  if (remaining.length === existing.length) return sheet
+  return {
+    ...sheet,
+    merges: remaining.length ? remaining : undefined,
   }
 }
 
@@ -315,15 +568,22 @@ export function isCellLocked(sheet: WorkbookSheet, key: string): boolean {
   })
 }
 
-/** True when any cell in the range is locked. */
+/** True when any cell in the range is locked (O(L) bounding-box check). */
 export function isRangeLocked(
   sheet: WorkbookSheet,
   rangeToken: string,
 ): boolean {
-  return cellsInRange(rangeToken).some(key => isCellLocked(sheet, key))
+  const lockedRanges = sheet.protection?.lockedRanges
+  if (!lockedRanges?.length) return false
+  const bounds = parseRangeBounds(rangeToken)
+  if (!bounds) return false
+  return lockedRanges.some(locked => {
+    const lockedBounds = parseRangeBounds(locked)
+    return Boolean(lockedBounds && boundsIntersect(bounds, lockedBounds))
+  })
 }
 
-function boundsIntersect(
+export function boundsIntersect(
   a: { start: CellPosition; end: CellPosition },
   b: { start: CellPosition; end: CellPosition },
 ): boolean {
@@ -333,6 +593,40 @@ function boundsIntersect(
     a.start.column <= b.end.column &&
     a.end.column >= b.start.column
   )
+}
+
+export function isRowDeletionBlockedByProtection(
+  sheet: WorkbookSheet,
+  rowIndex: number,
+): boolean {
+  const lockedRanges = sheet.protection?.lockedRanges
+  if (!lockedRanges?.length) return false
+  for (const locked of lockedRanges) {
+    const bounds = parseRangeBounds(locked)
+    if (bounds && bounds.start.row <= rowIndex && bounds.end.row >= rowIndex) {
+      return true
+    }
+  }
+  return false
+}
+
+export function isColumnDeletionBlockedByProtection(
+  sheet: WorkbookSheet,
+  columnIndexValue: number,
+): boolean {
+  const lockedRanges = sheet.protection?.lockedRanges
+  if (!lockedRanges?.length) return false
+  for (const locked of lockedRanges) {
+    const bounds = parseRangeBounds(locked)
+    if (
+      bounds &&
+      bounds.start.column <= columnIndexValue &&
+      bounds.end.column >= columnIndexValue
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +670,7 @@ export function findMatches(
   sheet: WorkbookSheet,
   query: string,
   options: { matchCase?: boolean } = {},
+  workbook?: FormulaWorkbook,
 ): string[] {
   const matchCase = options.matchCase ?? false
   const needle = matchCase ? query.trim() : query.trim().toLowerCase()
@@ -389,7 +684,7 @@ export function findMatches(
     })
     .filter(key => {
       const raw = sheet.cells[key]?.value ?? ''
-      const display = displayCellValue(sheet, key)
+      const display = displayCellValue(sheet, key, workbook)
       const haystackRaw = matchCase ? raw : raw.toLowerCase()
       const haystackDisplay = matchCase ? display : display.toLowerCase()
       return haystackRaw.includes(needle) || haystackDisplay.includes(needle)
@@ -413,9 +708,10 @@ export function replaceFirstOccurrence(
   const cell = sheet.cells[cellKey]
   if (!cell) return { sheet, replaced: false }
   // Non-global regex ⇒ String.replace swaps only the first match.
+  // Use a replacer function so `$100` / `$$` / `$&` in replaceText are literal.
   const pattern = new RegExp(escapeRegExp(findText), options.matchCase ? '' : 'i')
   if (!pattern.test(cell.value)) return { sheet, replaced: false }
-  const nextValue = cell.value.replace(pattern, replaceText)
+  const nextValue = cell.value.replace(pattern, () => replaceText)
   if (nextValue === cell.value) return { sheet, replaced: false }
   return { sheet: upsertCell(sheet, cellKey, nextValue), replaced: true }
 }
@@ -461,25 +757,41 @@ function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function mergeCellStyle(
+  currentStyle: SheetCell['style'],
+  patch: Partial<NonNullable<SheetCell['style']>>,
+): SheetCell['style'] {
+  const style: Record<string, unknown> = { ...currentStyle }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) delete style[k]
+    else style[k] = v
+  }
+  // A chosen format or border replaces what an import carried.
+  if (('numberFormat' in patch || 'decimals' in patch) && !('numberPattern' in patch)) {
+    delete style.numberPattern
+  }
+  if ('border' in patch && !('borderSides' in patch)) {
+    delete style.borderSides
+  }
+  return Object.keys(style).length ? (style as SheetCell['style']) : undefined
+}
+
 export function setCellStyle(
   sheet: WorkbookSheet,
   key: string,
   patch: Partial<NonNullable<SheetCell['style']>>,
 ): WorkbookSheet {
   const current = sheet.cells[key] ?? { value: '', kind: 'blank' as const }
-  const style = { ...current.style, ...patch }
-  // A chosen format or border replaces what an import carried.
-  if (('numberFormat' in patch || 'decimals' in patch) && !('numberPattern' in patch)) delete style.numberPattern
-  if ('border' in patch && !('borderSides' in patch)) delete style.borderSides
+  const style = mergeCellStyle(current.style, patch)
+  const nextCells = { ...sheet.cells }
+  if (!style && current.kind === 'blank' && !current.value) {
+    delete nextCells[key]
+  } else {
+    nextCells[key] = { ...current, style }
+  }
   return {
     ...sheet,
-    cells: {
-      ...sheet.cells,
-      [key]: {
-        ...current,
-        style,
-      },
-    },
+    cells: nextCells,
   }
 }
 
@@ -487,13 +799,57 @@ export function setRangeStyle(
   sheet: WorkbookSheet,
   rangeToken: string,
   patch: Partial<NonNullable<SheetCell['style']>>,
+  maxCells = MAX_RANGE_EXPANSION_CELLS,
 ): WorkbookSheet {
-  const keys = cellsInRange(rangeToken)
+  const keys = cellsInRange(rangeToken, maxCells)
   if (!keys.length) return sheet
-  return keys.reduce(
-    (nextSheet, key) => setCellStyle(nextSheet, key, patch),
-    sheet,
-  )
+  const nextCells = { ...sheet.cells }
+  for (const key of keys) {
+    const current = nextCells[key] ?? { value: '', kind: 'blank' as const }
+    const style = mergeCellStyle(current.style, patch)
+    if (!style && current.kind === 'blank' && !current.value) {
+      delete nextCells[key]
+    } else {
+      nextCells[key] = { ...current, style }
+    }
+  }
+  return {
+    ...sheet,
+    cells: nextCells,
+  }
+}
+
+/** Clear all formatting (styles) from cells in the given range while preserving values. */
+export function clearRangeStyle(
+  sheet: WorkbookSheet,
+  rangeToken: string,
+): WorkbookSheet {
+  const bounds = parseRangeBounds(rangeToken)
+  if (!bounds) return sheet
+  let changed = false
+  const nextCells = { ...sheet.cells }
+  for (const key of Object.keys(sheet.cells)) {
+    const pos = parseCellKey(key)
+    if (
+      !pos ||
+      pos.row < bounds.start.row ||
+      pos.row > bounds.end.row ||
+      pos.column < bounds.start.column ||
+      pos.column > bounds.end.column
+    ) {
+      continue
+    }
+    const cell = nextCells[key]
+    if (!cell?.style) continue
+    changed = true
+    if (cell.kind === 'blank' && !cell.value) {
+      delete nextCells[key]
+    } else {
+      nextCells[key] = { value: cell.value, kind: cell.kind }
+    }
+  }
+  if (!changed) return sheet
+  return { ...sheet, cells: nextCells }
 }
 
 // Table-style presets (Phase S2). Quiet neutrals from the enterprise palette;
@@ -549,8 +905,9 @@ export function applyTableStylePreset(
 export function rangeToDelimitedText(
   sheet: WorkbookSheet,
   rangeToken: string,
+  workbook?: FormulaWorkbook,
 ): string {
-  const bounds = parseRange(rangeToken)
+  const bounds = parseRangeBounds(rangeToken)
   if (!bounds) return ''
   const rows: string[] = []
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
@@ -560,7 +917,7 @@ export function rangeToDelimitedText(
       column <= bounds.end.column;
       column += 1
     ) {
-      values.push(displayCellValue(sheet, cellKey(row, column)))
+      values.push(displayCellValue(sheet, cellKey(row, column), workbook))
     }
     rows.push(values.join('\t'))
   }
@@ -624,9 +981,50 @@ export function setRowHeight(
 }
 
 /**
- * Rewrite every cell reference in a formula (skipping quoted strings).
- * The callback returns the replacement reference text, or null to mark the
- * reference broken (#REF!).
+ * Apply `transform` only to formula segments outside double-quoted string
+ * literals (`"..."`, with `""` escapes). Single-quoted sheet prefixes
+ * (`'Q1'!A1`) remain visible to reference mappers so an out-of-bounds shift
+ * replaces the entire cross-sheet reference with `#REF!`.
+ */
+function mapFormulaOutsideLiterals(
+  formula: string,
+  transform: (segment: string) => string,
+): string {
+  let result = ''
+  let segment = ''
+  let index = 0
+  while (index < formula.length) {
+    const ch = formula[index]
+    if (ch === '"') {
+      result += transform(segment)
+      segment = ''
+      let end = index + 1
+      while (end < formula.length) {
+        if (formula[end] === '"') {
+          if (formula[end + 1] === '"') {
+            end += 2
+          } else {
+            break
+          }
+        } else {
+          end += 1
+        }
+      }
+      result += formula.slice(index, end + 1)
+      index = end + 1
+    } else {
+      segment += ch
+      index += 1
+    }
+  }
+  return result + transform(segment)
+}
+
+/**
+ * Rewrite cell references in a formula (skipping `"..."` strings, matching
+ * `'Q1'!A1` and `Sheet!A1` prefixes atomically, and avoiding scientific
+ * notation like `1E2`).
+ * The callback returns the replacement position, or null to mark `#REF!`.
  */
 function mapFormulaRefs(
   formula: string,
@@ -636,37 +1034,68 @@ function mapFormulaRefs(
     absRow: boolean
     absColumn: boolean
   }) => { row: number; column: number } | null,
+  options: { skipCrossSheet?: boolean } = {},
 ): string {
-  return formula
-    .split('"')
-    .map((segment, index) => {
-      if (index % 2 === 1) return segment // inside a quoted string
-      return segment.replace(
-        /(\$?)([A-Z]+)(\$?)(\d+)(?![A-Z0-9(!])/gi,
-        (
-          token,
-          absColumn: string,
-          columnText: string,
-          absRow: string,
-          rowText: string,
-        ) => {
-          const position = parseCellKey(`${columnText}${rowText}`)
-          if (!position) return token
-          const mapped = map({
-            row: position.row,
-            column: position.column,
-            absRow: absRow === '$',
-            absColumn: absColumn === '$',
-          })
-          if (!mapped) return '#REF!'
-          if (mapped.row < 0 || mapped.column < 0) return '#REF!'
-          return `${absColumn}${columnLabel(mapped.column)}${absRow}${
-            mapped.row + 1
-          }`
-        },
-      )
+  const rewriteSingle = (
+    absColumn: string,
+    columnText: string,
+    absRow: string,
+    rowText: string,
+    fallback: string,
+  ): string => {
+    const position = parseCellKey(`${columnText}${rowText}`)
+    if (!position) return fallback
+    const mapped = map({
+      row: position.row,
+      column: position.column,
+      absRow: absRow === '$',
+      absColumn: absColumn === '$',
     })
-    .join('"')
+    if (!mapped || mapped.row < 0 || mapped.column < 0) return '#REF!'
+    return `${absColumn}${columnLabel(mapped.column)}${absRow}${mapped.row + 1}`
+  }
+
+  return mapFormulaOutsideLiterals(formula, segment =>
+    segment.replace(
+      /(?:('(?:[^']|'')+'!)|(?<![A-Z0-9_.$:])([A-Z_][A-Z0-9_.]*!)|(?<![A-Z0-9_.$:!']))(\$?)([A-Z]{1,3})(\$?)(\d+)(?::(\$?)([A-Z]{1,3})(\$?)(\d+))?(?![A-Z0-9_(!.])|'(?:[^']|'')+'/gi,
+      (
+        token,
+        quotedSheetPrefix: string | undefined,
+        bareSheetPrefix: string | undefined,
+        absCol1: string | undefined,
+        col1: string | undefined,
+        absRow1: string | undefined,
+        row1: string | undefined,
+        absCol2: string | undefined,
+        col2: string | undefined,
+        absRow2: string | undefined,
+        row2: string | undefined,
+      ) => {
+        if (col1 === undefined || row1 === undefined) return token
+        const sheetPrefix = quotedSheetPrefix ?? bareSheetPrefix
+        if (sheetPrefix && options.skipCrossSheet) return token
+        const first = rewriteSingle(
+          absCol1 ?? '',
+          col1,
+          absRow1 ?? '',
+          row1,
+          `${absCol1 ?? ''}${col1}${absRow1 ?? ''}${row1}`,
+        )
+        if (col2 === undefined || row2 === undefined) {
+          return first === '#REF!' ? '#REF!' : `${sheetPrefix ?? ''}${first}`
+        }
+        const second = rewriteSingle(
+          absCol2 ?? '',
+          col2,
+          absRow2 ?? '',
+          row2,
+          `${absCol2 ?? ''}${col2}${absRow2 ?? ''}${row2}`,
+        )
+        if (first === '#REF!' || second === '#REF!') return '#REF!'
+        return `${sheetPrefix ?? ''}${first}:${second}`
+      },
+    ),
+  )
 }
 
 /** Apply a formula rewrite to every formula cell in a cell map. */
@@ -692,36 +1121,39 @@ function shiftFormulaRefsForAxis(
   target: number,
   delta: 1 | -1,
 ): string {
-  return formula
-    .split('"')
-    .map((segment, index) => {
-      if (index % 2 === 1) return segment
-      return segment.replace(
-        /(?<![A-Z0-9_.$!:])(?:(?:'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?(?![A-Z0-9_.$(!:])/gi,
-        token => {
-          // Consume qualified ranges as a whole so neither endpoint nor a suffix is shifted.
-          if (token.includes('!')) return token
-          if (token.includes(':')) {
-            return shiftRangeTokenForAxis(token, axis, target, delta) ?? '#REF!'
-          }
-          return mapFormulaRefs(token, ref => {
-            const refIndex = axis === 'row' ? ref.row : ref.column
-            if (delta === -1 && refIndex === target) return null
-            const shifted = refIndex >= target ? refIndex + delta : refIndex
-            return axis === 'row'
-              ? { row: shifted, column: ref.column }
-              : { row: ref.row, column: shifted }
-          })
-        },
-      )
-    })
-    .join('"')
+  return mapFormulaOutsideLiterals(formula, segment =>
+    segment.replace(
+      /(?:('(?:[^']|'')+'!)|(?<![A-Z0-9_.$:])([A-Z_][A-Z0-9_.]*!)|(?<![A-Z0-9_.$:!']))(\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)(?![A-Z0-9_.$(!:])|'(?:[^']|'')+'/gi,
+      (
+        token,
+        quotedSheetPrefix: string | undefined,
+        bareSheetPrefix: string | undefined,
+        refToken: string | undefined,
+      ) => {
+        if (refToken === undefined) return token
+        // Cross-sheet references (`Sheet!A1` or `'Q1'!A1`) belong to another sheet.
+        if (quotedSheetPrefix || bareSheetPrefix) return token
+        if (refToken.includes(':')) {
+          return shiftRangeTokenForAxis(refToken, axis, target, delta) ?? '#REF!'
+        }
+        return mapFormulaRefs(refToken, ref => {
+          const refIndex = axis === 'row' ? ref.row : ref.column
+          if (delta === -1 && refIndex === target) return null
+          const shifted = refIndex >= target ? refIndex + delta : refIndex
+          return axis === 'row'
+            ? { row: shifted, column: ref.column }
+            : { row: ref.row, column: shifted }
+        })
+      },
+    ),
+  )
 }
 
 /**
- * Shift positional metadata (comments keyed by cell; validation, protection
- * and conditional-format ranges) with a structural edit, mirroring how the
- * cells themselves move. Rules that lose their entire range are dropped.
+ * Shift positional metadata (comments keyed by cell; validation, protection,
+ * conditional-format, merge, and chart ranges) with a structural edit,
+ * mirroring how the cells themselves move. Rules that lose their entire range
+ * are dropped.
  */
 function shiftPositionalMetadata(
   sheet: WorkbookSheet,
@@ -730,7 +1162,12 @@ function shiftPositionalMetadata(
   delta: 1 | -1,
 ): Pick<
   WorkbookSheet,
-  'comments' | 'validations' | 'protection' | 'conditionalFormats' | 'merges'
+  | 'comments'
+  | 'validations'
+  | 'protection'
+  | 'conditionalFormats'
+  | 'merges'
+  | 'charts'
 > {
   const comments = shiftCellKeyRecord(sheet.comments, axis, target, delta)
   const validations = (sheet.validations ?? []).flatMap(rule => {
@@ -754,6 +1191,12 @@ function shiftPositionalMetadata(
     const [start, end] = range.split(':')
     return start === end ? [] : [range]
   })
+  const charts = sheet.charts?.map(chart => {
+    const shifted = shiftRangeTokenForAxis(chart.range, axis, target, delta)
+    return shifted && shifted !== chart.range
+      ? { ...chart, range: shifted }
+      : chart
+  })
   return {
     comments,
     merges: merges.length ? merges : undefined,
@@ -762,6 +1205,7 @@ function shiftPositionalMetadata(
     conditionalFormats: conditionalFormats.length
       ? conditionalFormats
       : undefined,
+    charts,
   }
 }
 
@@ -794,8 +1238,7 @@ function shiftRangeTokenForAxis(
   target: number,
   delta: 1 | -1,
 ): string | null {
-  const normalized = normalizeRangeToken(rangeToken)
-  const bounds = normalized ? parseRange(normalized) : null
+  const bounds = parseRangeBounds(rangeToken)
   if (!bounds) return rangeToken
   let start = axis === 'row' ? bounds.start.row : bounds.start.column
   let end = axis === 'row' ? bounds.end.row : bounds.end.column
@@ -808,10 +1251,16 @@ function shiftRangeTokenForAxis(
     if (end >= target) end -= 1
     if (end < start) return null
   }
-  const [originalStart, originalEnd] = rangeToken.split(':')
+  const hasColon = rangeToken.includes(':')
+  const [originalStart, originalEnd] = rangeToken.trim().split(':')
   const formatRef = (original: string | undefined, row: number, column: number) => {
-    const parts = /^(\$?)[A-Z]+(\$?)\d+$/i.exec(original ?? '')
+    const parts = /^(\$?)[A-Z]+(\$?)\d+$/i.exec((original ?? '').trim())
     return `${parts?.[1] ?? ''}${columnLabel(column)}${parts?.[2] ?? ''}${row + 1}`
+  }
+  if (!hasColon) {
+    return axis === 'row'
+      ? formatRef(originalStart, start, bounds.start.column)
+      : formatRef(originalStart, bounds.start.row, start)
   }
   return axis === 'row'
     ? `${formatRef(originalStart, start, bounds.start.column)}:${formatRef(
@@ -855,6 +1304,7 @@ export function deleteRow(
 ): WorkbookSheet {
   if (sheet.rowCount <= 1) return sheet
   const targetRow = clampIndex(rowIndex, sheet.rowCount - 1)
+  if (isRowDeletionBlockedByProtection(sheet, targetRow)) return sheet
   const nextCells: Record<string, SheetCell> = {}
   for (const [key, cell] of Object.entries(sheet.cells)) {
     const position = parseCellKey(key)
@@ -903,6 +1353,7 @@ export function deleteColumn(
 ): WorkbookSheet {
   if (sheet.columnCount <= 1) return sheet
   const targetColumn = clampIndex(columnIndexValue, sheet.columnCount - 1)
+  if (isColumnDeletionBlockedByProtection(sheet, targetColumn)) return sheet
   const nextCells: Record<string, SheetCell> = {}
   for (const [key, cell] of Object.entries(sheet.cells)) {
     const position = parseCellKey(key)
@@ -986,6 +1437,7 @@ export interface CopiedCellBlock {
 export function copyRangeCells(
   sheet: WorkbookSheet,
   rangeToken: string,
+  workbook?: FormulaWorkbook,
 ): CopiedCellBlock | null {
   const normalized = normalizeRangeToken(rangeToken)
   const bounds = normalized ? parseRange(normalized) : null
@@ -1002,7 +1454,7 @@ export function copyRangeCells(
     ) {
       const key = cellKey(row, column)
       cellRow.push(cloneCell(sheet.cells[key]))
-      valueRow.push(rawCellValue(sheet, key))
+      valueRow.push(computedCellValue(sheet, key, workbook))
     }
     cells.push(cellRow)
     computedValues.push(valueRow)
@@ -1068,9 +1520,10 @@ export function pasteCellBlock(
           }
           continue
         }
+        // Paste-values must never promote `=`-prefixed text into a live formula.
         nextCells[key] = {
           value,
-          kind: deriveCellKind(value),
+          kind: numberLike(value.trim()) ? 'number' : 'text',
           style: existing?.style ? { ...existing.style } : undefined,
         }
         continue
@@ -1199,14 +1652,21 @@ export function sortRange(
   sheet: WorkbookSheet,
   rangeToken: string,
   direction: 'asc' | 'desc' = 'asc',
+  workbook?: FormulaWorkbook,
+  options: { hasHeader?: boolean } = {},
 ): WorkbookSheet {
-  const bounds = parseRange(rangeToken)
+  const bounds = parseRangeBounds(rangeToken)
   if (!bounds) return sheet
   // Sorting rearranges values — refuse when the range touches locked cells.
   if (isRangeLocked(sheet, rangeToken)) return sheet
+  const sortStartRow =
+    options.hasHeader && bounds.end.row > bounds.start.row
+      ? bounds.start.row + 1
+      : bounds.start.row
+  if (sortStartRow >= bounds.end.row) return sheet
   const sortColumn = bounds.start.column
   const rows = []
-  for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
+  for (let row = sortStartRow; row <= bounds.end.row; row += 1) {
     const cells = []
     for (
       let column = bounds.start.column;
@@ -1214,11 +1674,15 @@ export function sortRange(
       column += 1
     ) {
       const key = cellKey(row, column)
-      cells.push({ key, cell: sheet.cells[key] })
+      cells.push({
+        key,
+        cell: sheet.cells[key],
+        comment: sheet.comments?.[key],
+      })
     }
-    const blank =
-      displayCellValue(sheet, cellKey(row, sortColumn)).trim() === ''
-    rows.push({ row, cells, blank })
+    const sortValue = computedCellValue(sheet, cellKey(row, sortColumn), workbook)
+    const blank = sortValue.trim() === ''
+    rows.push({ row, cells, blank, sortValue })
   }
   // Empty cells are NOT accounted for: rows blank in the sort column keep their
   // position, and only the rows that actually have a value are reordered — they
@@ -1226,12 +1690,15 @@ export function sortRange(
   const sortedNonBlank = rows
     .filter(entry => !entry.blank)
     .sort((left, right) => {
-      const leftValue = displayCellValue(sheet, cellKey(left.row, sortColumn))
-      const rightValue = displayCellValue(sheet, cellKey(right.row, sortColumn))
+      const leftValue = left.sortValue
+      const rightValue = right.sortValue
       const leftNumber = Number(leftValue)
       const rightNumber = Number(rightValue)
       const comparison =
-        Number.isFinite(leftNumber) && Number.isFinite(rightNumber)
+        leftValue.trim() !== '' &&
+        rightValue.trim() !== '' &&
+        Number.isFinite(leftNumber) &&
+        Number.isFinite(rightNumber)
           ? leftNumber - rightNumber
           : leftValue.localeCompare(rightValue)
       return direction === 'asc' ? comparison : -comparison
@@ -1241,31 +1708,47 @@ export function sortRange(
     entry.blank ? entry : sortedNonBlank[nextNonBlank++],
   )
   const nextCells = { ...sheet.cells }
+  const nextComments = sheet.comments ? { ...sheet.comments } : undefined
   targetOrder.forEach((sourceRow, targetOffset) => {
-    const targetRow = bounds.start.row + targetOffset
+    const targetRow = sortStartRow + targetOffset
     const rowDelta = targetRow - sourceRow.row
-    sourceRow.cells.forEach(({ cell }, columnOffset) => {
+    sourceRow.cells.forEach(({ cell, comment }, columnOffset) => {
       const targetKey = cellKey(targetRow, bounds.start.column + columnOffset)
       if (cell) {
         // A moved formula behaves like cut/paste: relative row references
-        // travel with the row so per-row formulas stay correct after sorting.
+        // inside the sorted row band travel with the row; cross-sheet refs and
+        // refs outside the sorted band stay anchored.
         nextCells[targetKey] =
           cell.kind === 'formula' && rowDelta !== 0
             ? {
                 ...cell,
-                value: mapFormulaRefs(cell.value, ref =>
-                  ref.absRow
-                    ? { row: ref.row, column: ref.column }
-                    : { row: ref.row + rowDelta, column: ref.column },
+                value: mapFormulaRefs(
+                  cell.value,
+                  ref =>
+                    ref.absRow ||
+                    ref.row < sortStartRow ||
+                    ref.row > bounds.end.row
+                      ? { row: ref.row, column: ref.column }
+                      : { row: ref.row + rowDelta, column: ref.column },
+                  { skipCrossSheet: true },
                 ),
               }
             : cell
       } else delete nextCells[targetKey]
+      if (nextComments) {
+        if (comment !== undefined) nextComments[targetKey] = comment
+        else delete nextComments[targetKey]
+      }
     })
   })
   return {
     ...sheet,
     cells: nextCells,
+    ...(nextComments !== undefined
+      ? {
+          comments: Object.keys(nextComments).length ? nextComments : undefined,
+        }
+      : {}),
   }
 }
 
@@ -1280,6 +1763,23 @@ export function toggleFreezeFirstColumn(sheet: WorkbookSheet): WorkbookSheet {
   return {
     ...sheet,
     frozenColumns: sheet.frozenColumns ? 0 : 1,
+  }
+}
+
+export function setFreezePanes(
+  sheet: WorkbookSheet,
+  frozenRows: number,
+  frozenColumns: number,
+): WorkbookSheet {
+  const nextRows = Math.max(0, Math.min(sheet.rowCount, Math.floor(frozenRows)))
+  const nextColumns = Math.max(
+    0,
+    Math.min(sheet.columnCount, Math.floor(frozenColumns)),
+  )
+  return {
+    ...sheet,
+    frozenRows: nextRows,
+    frozenColumns: nextColumns,
   }
 }
 
@@ -1308,7 +1808,16 @@ export function setFilterHasHeader(
   return { ...sheet, filterHasHeader: hasHeader }
 }
 
-export function visibleRowsForSheet(sheet: WorkbookSheet): number[] {
+export function visibleRowsForSheet(
+  sheet: WorkbookSheet,
+  workbook?: FormulaWorkbook,
+): number[] {
+  if (
+    (sheet.columnFilters && Object.keys(sheet.columnFilters).length > 0) ||
+    (sheet.hiddenRows && sheet.hiddenRows.length > 0)
+  ) {
+    return visibleRowsWithFilters(sheet, workbook)
+  }
   const rows = Array.from({ length: sheet.rowCount }, (_, row) => row)
   if (sheet.filterRow !== 0) return rows
   const filterColumn = Math.max(0, Math.floor(sheet.filterColumn ?? 0))
@@ -1316,7 +1825,7 @@ export function visibleRowsForSheet(sheet: WorkbookSheet): number[] {
   return rows.filter(row => {
     // The header row stays visible only when the sheet is marked as having one.
     if (row === sheet.filterRow && sheet.filterHasHeader !== false) return true
-    const value = displayCellValue(sheet, cellKey(row, filterColumn))
+    const value = displayCellValue(sheet, cellKey(row, filterColumn), workbook)
     // With a filter query: contains-match (case-insensitive) on the filter
     // column. Without one: the original non-empty filter.
     if (query) return value.toLowerCase().includes(query)
@@ -1328,8 +1837,9 @@ export function createChartFromRange(
   sheet: WorkbookSheet,
   rangeToken: string,
   type: WorkbookChart['type'] = 'bar',
+  workbook?: FormulaWorkbook,
 ): WorkbookSheet {
-  const chart = chartFromRange(sheet, rangeToken, type)
+  const chart = chartFromRange(sheet, rangeToken, type, workbook)
   if (!chart) return sheet
   return {
     ...sheet,
@@ -1362,6 +1872,7 @@ export function updateChart(
       'title' | 'type' | 'range' | 'legend' | 'showAxes' | 'xLabel' | 'yLabel'
     >
   >,
+  workbook?: FormulaWorkbook,
 ): WorkbookSheet {
   const charts = sheet.charts ?? []
   const existing = charts.find(chart => chart.id === chartId)
@@ -1374,13 +1885,19 @@ export function updateChart(
   if (rangeChanged || typeChanged) {
     const range =
       normalizeRangeToken(patch.range ?? existing.range) ?? existing.range
-    const derived = chartFromRange(sheet, range, patch.type ?? existing.type)
+    const derived = chartFromRange(
+      sheet,
+      range,
+      patch.type ?? existing.type,
+      workbook,
+    )
     if (!derived) return sheet
     next = {
       ...next,
       range,
       labels: derived.labels,
       values: derived.values,
+      series: derived.series,
     }
   }
   return {
@@ -1391,8 +1908,8 @@ export function updateChart(
 
 /**
  * True when the sheet carries positional metadata (comments, validation,
- * protection, conditional formats). Structural edits on such sheets must run
- * through the model (which shifts the metadata) rather than the Univer
+ * protection, conditional formats, charts). Structural edits on such sheets
+ * must run through the model (which shifts the metadata) rather than the Univer
  * bridge, whose snapshot export copies `custom` verbatim and would leave the
  * metadata pointing at the wrong cells.
  */
@@ -1401,7 +1918,8 @@ export function sheetHasPositionalMetadata(sheet: WorkbookSheet): boolean {
     (sheet.comments && Object.keys(sheet.comments).length) ||
       sheet.validations?.length ||
       sheet.protection?.lockedRanges.length ||
-      sheet.conditionalFormats?.length,
+      sheet.conditionalFormats?.length ||
+      sheet.charts?.length,
   )
 }
 
@@ -1430,26 +1948,40 @@ function chartFromRange(
   sheet: WorkbookSheet,
   rangeToken: string,
   type: WorkbookChart['type'],
+  workbook?: FormulaWorkbook,
 ): WorkbookChart | null {
-  const bounds = parseRange(rangeToken)
+  const bounds = parseRangeBounds(rangeToken)
   if (!bounds) return null
+  const colSpan = bounds.end.column - bounds.start.column + 1
+  if (colSpan >= 3) {
+    const extracted = extractChartData(sheet, rangeToken, type, formulaWorkbook ?? undefined)
+    if (extracted) {
+      return {
+        id: nextChartId(),
+        title: `${rangeToken} ${type} chart`,
+        type,
+        range: rangeToken,
+        labels: extracted.labels,
+        values: extracted.values,
+        series: extracted.series,
+      }
+    }
+  }
   const rows: Array<{ label: string; value: number }> = []
   const hasLabelColumn = bounds.end.column > bounds.start.column
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
-    const labelKey = hasLabelColumn
-      ? cellKey(row, bounds.start.column)
-      : cellKey(row, bounds.start.column)
+    const labelKey = cellKey(row, bounds.start.column)
     const valueKey = hasLabelColumn
       ? cellKey(row, bounds.start.column + 1)
       : cellKey(row, bounds.start.column)
-    const rawText = rawCellValue(sheet, valueKey)
+    const rawText = computedCellValue(sheet, valueKey, workbook)
     // A blank cell is not a zero data point (Number('') === 0).
     if (rawText.trim() === '') continue
     const rawValue = Number(rawText)
     if (!Number.isFinite(rawValue)) continue
     rows.push({
       label: hasLabelColumn
-        ? displayCellValue(sheet, labelKey) || labelKey
+        ? displayCellValue(sheet, labelKey, workbook) || labelKey
         : valueKey,
       value: rawValue,
     })
@@ -1542,8 +2074,8 @@ function formulaResultsFor(sheet: WorkbookSheet): Map<string, string> {
 
 /** The sheets a formula may name (Sheet2!A1). */
 export interface FormulaWorkbook {
-  namedRanges?: PureSheetsDocument['workbook']['namedRanges']
   sheets: readonly WorkbookSheet[]
+  namedRanges?: readonly import('../types').NamedRange[]
 }
 /** The workbook of the evaluation under way: set by the public entry points, kept by everything they call. */
 let formulaWorkbook: FormulaWorkbook | null = null
@@ -1592,7 +2124,14 @@ function evaluateFormulaHere(sheet: WorkbookSheet, formula: string): string {
   }
   formulaEvaluationDepth += 1
   try {
-    const expanded = formulaWorkbook?.namedRanges ? expandRangeNames(formula, formulaWorkbook.namedRanges, formulaWorkbook.sheets) : formula
+    const expanded = formulaWorkbook?.namedRanges?.length
+      ? resolveNamedRangesInFormula(
+          formula,
+          formulaWorkbook.namedRanges,
+          formulaWorkbook.sheets,
+          sheet.id,
+        )
+      : formula
     const expression = expanded.trim().replace(/^=/, '')
     if (!expression) return '#FORMULA'
     const result = evaluateExpressionString(sheet, expression)
@@ -1626,7 +2165,9 @@ function formulaArgumentError(
   if (REFERENCE.test(trimmed)) {
     const [target, range] = targetOf(sheet, trimmed)
     if (!target) return '#REF!'
-    for (const key of cellKeysInRange(range.replace(/\$/g, ''))) {
+    const keys = cellKeysInRange(range.replace(/\$/g, ''))
+    if (keys === null) return '#NUM!'
+    for (const key of keys) {
       if (target.cells[key]?.kind !== 'formula') continue
       const value = rawCellValue(target, key)
       if (isFormulaError(value)) return value
@@ -1649,32 +2190,6 @@ function applyFormulaFunction(
       if (error) return error
     }
   }
-  const rawValues = rawArgs.flatMap(part =>
-    numericArgValues(sheet, part.trim()),
-  )
-  const values = rawValues
-    // A blank cell is not a zero: without this filter, Number('') === 0 made
-    // COUNT/AVERAGE/MIN/MAX over sparse ranges count phantom zeros (caught by
-    // the engine-agnostic golden suite against Univer's engine).
-    .filter(value => value.trim() !== '')
-    .map(value => Number(value))
-    .filter(value => Number.isFinite(value))
-  const textValues = rawArgs.flatMap(part => expandRange(sheet, part.trim()))
-
-  if (fn === 'SUM')
-    return String(values.reduce((total, value) => total + value, 0))
-  if (fn === 'AVERAGE') {
-    return values.length
-      ? String(
-          values.reduce((total, value) => total + value, 0) / values.length,
-        )
-      : '#DIV/0!'
-  }
-  if (fn === 'MIN') return values.length ? String(Math.min(...values)) : '0'
-  if (fn === 'MAX') return values.length ? String(Math.max(...values)) : '0'
-  if (fn === 'COUNT') return String(values.length)
-  if (fn === 'COUNTA')
-    return String(textValues.filter(value => value !== '').length)
   if (fn === 'IF') {
     const [condition, truthy = '', falsy = ''] = rawArgs
     const conditionResult = truthyCondition(sheet, condition)
@@ -1684,10 +2199,37 @@ function applyFormulaFunction(
       : resolveTextArg(sheet, falsy)
   }
   if (fn === 'ROUND') {
-    const [value, places = 0] = values
-    return Number.isFinite(value)
-      ? String(Number(value.toFixed(places)))
-      : '#VALUE'
+    const valueRaw = rawArgs[0] !== undefined ? resolveTextArg(sheet, rawArgs[0]) : ''
+    const placesRaw = rawArgs[1] !== undefined ? resolveTextArg(sheet, rawArgs[1]) : '0'
+    if (isFormulaError(valueRaw)) return valueRaw
+    if (isFormulaError(placesRaw)) return placesRaw
+    const value = Number(valueRaw)
+    const places = Math.trunc(Number(placesRaw))
+    if (
+      valueRaw.trim() === '' ||
+      !Number.isFinite(value) ||
+      !Number.isFinite(places)
+    ) {
+      return '#VALUE!'
+    }
+    if (value === 0) return '0'
+    const clampedPlaces = Math.max(-100, Math.min(100, places))
+    const shiftDecimal = (abs: number, exp: number): number => {
+      if (abs === 0 || exp === 0) return abs
+      const [mantissa, rawExp] = String(abs).split(/[eE]/)
+      const nextExp = (rawExp ? Number(rawExp) : 0) + exp
+      return Number(`${mantissa}e${nextExp}`)
+    }
+    const sign = value < 0 ? -1 : 1
+    const abs = Math.abs(value)
+    const shifted = shiftDecimal(abs, clampedPlaces)
+    if (!Number.isFinite(shifted)) {
+      return clampedPlaces > 0 ? String(value) : '0'
+    }
+    const roundedMag = shiftDecimal(Math.round(shifted), -clampedPlaces)
+    if (!Number.isFinite(roundedMag)) return '#NUM!'
+    const rounded = sign * roundedMag
+    return String(Object.is(rounded, -0) || rounded === 0 ? 0 : rounded)
   }
   if (fn === 'CONCAT')
     return rawArgs.map(arg => resolveTextArg(sheet, arg)).join('')
@@ -1717,7 +2259,39 @@ function applyFormulaFunction(
   if (fn === 'IFERROR') {
     const [tryArg = '', fallback = ''] = rawArgs
     const result = resolveTextArg(sheet, tryArg)
-    return result.startsWith('#') ? resolveTextArg(sheet, fallback) : result
+    return isFormulaError(result) ? resolveTextArg(sheet, fallback) : result
+  }
+
+  const rawValues = rawArgs.flatMap(part =>
+    numericArgValues(sheet, part.trim()),
+  )
+  const values = rawValues
+    // A blank cell is not a zero: without this filter, Number('') === 0 made
+    // COUNT/AVERAGE/MIN/MAX over sparse ranges count phantom zeros (caught by
+    // the engine-agnostic golden suite against Univer's engine).
+    .filter(value => value.trim() !== '')
+    .map(value => Number(value))
+    .filter(value => Number.isFinite(value))
+
+  if (fn === 'SUM')
+    return String(values.reduce((total, value) => total + value, 0))
+  if (fn === 'AVERAGE') {
+    return values.length
+      ? String(
+          values.reduce((total, value) => total + value, 0) / values.length,
+        )
+      : '#DIV/0!'
+  }
+  if (fn === 'MIN') return values.length ? String(Math.min(...values)) : '0'
+  if (fn === 'MAX') return values.length ? String(Math.max(...values)) : '0'
+  if (fn === 'COUNT') {
+    if (rawValues.some(v => v === '#NUM!')) return '#NUM!'
+    return String(values.length)
+  }
+  if (fn === 'COUNTA') {
+    const textValues = rawArgs.flatMap(part => expandRange(sheet, part.trim()))
+    if (textValues.some(v => v === '#NUM!')) return '#NUM!'
+    return String(textValues.filter(value => value !== '').length)
   }
   return '#NAME?'
 }
@@ -1818,6 +2392,11 @@ function tokenizeExpression(input: string): ExpressionToken[] | null {
   return tokens
 }
 
+interface EvalValue {
+  text: string
+  isBlankRef?: boolean
+}
+
 function evaluateExpressionString(
   sheet: WorkbookSheet,
   expression: string,
@@ -1831,7 +2410,14 @@ function evaluateExpressionString(
   const isOp = (text: string): boolean =>
     tokens[position]?.type === 'op' && tokens[position]?.text === text
 
-  function parsePrimary(): string | null {
+  const coerceNumeric = (val: EvalValue): number | null => {
+    if (val.isBlankRef && val.text === '') return 0
+    if (val.text.trim() === '') return null
+    const numeric = Number(val.text)
+    return Number.isFinite(numeric) ? numeric : null
+  }
+
+  function parsePrimary(): EvalValue | null {
     const token = peek()
     if (!token) return null
     if (token.type === 'op' && token.text === '(') {
@@ -1845,46 +2431,75 @@ function evaluateExpressionString(
       position += 1
       const operand = parsePrimary()
       if (operand === null) return null
-      if (isFormulaError(operand)) return operand
-      const numeric = Number(operand)
-      return Number.isFinite(numeric) ? String(-numeric) : '#VALUE'
+      if (isFormulaError(operand.text)) return { text: operand.text }
+      const numeric = coerceNumeric(operand)
+      if (numeric === null) return { text: '#VALUE!' }
+      const negated = -numeric
+      return { text: String(Object.is(negated, -0) ? 0 : negated) }
     }
     position += 1
-    if (token.type === 'number' || token.type === 'string') return token.text
+    if (token.type === 'number' || token.type === 'string') {
+      return { text: token.text }
+    }
     if (token.type === 'ref') {
       const [target, ref] = targetOf(sheet, token.text)
       const positionKey = target ? parseCellKey(ref) : null
-      return target && positionKey
-        ? rawCellValue(target, cellKey(positionKey.row, positionKey.column))
-        : '#REF!'
+      if (!target || !positionKey) return { text: '#REF!' }
+      const key = cellKey(positionKey.row, positionKey.column)
+      const cell = target.cells[key]
+      const text = rawCellValue(target, key)
+      return { text, isBlankRef: !cell || cell.kind === 'blank' }
     }
     if (token.type === 'range') {
       // A bare range outside a function argument resolves to its first cell
-      return expandRange(sheet, token.text)[0] ?? ''
+      const [target, rangePart] = targetOf(sheet, token.text)
+      const firstKey = rangePart.split(':')[0] ?? ''
+      const firstPos = target ? parseCellKey(firstKey) : null
+      const firstCell =
+        target && firstPos
+          ? target.cells[cellKey(firstPos.row, firstPos.column)]
+          : undefined
+      return {
+        text: expandRange(sheet, token.text)[0] ?? '',
+        isBlankRef: !firstCell || firstCell.kind === 'blank',
+      }
     }
     if (token.type === 'func') {
-      return applyFormulaFunction(
-        sheet,
-        token.text,
-        splitFormulaArguments(token.args ?? ''),
-      )
+      return {
+        text: applyFormulaFunction(
+          sheet,
+          token.text,
+          splitFormulaArguments(token.args ?? ''),
+        ),
+      }
     }
     return null
   }
 
-  function applyNumericOp(left: string, op: string, right: string): string {
-    if (isFormulaError(left)) return left
-    if (isFormulaError(right)) return right
-    const a = Number(left)
-    const b = Number(right)
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return '#VALUE'
-    if (op === '*') return String(a * b)
-    if (op === '/') return b === 0 ? '#DIV/0!' : String(a / b)
-    if (op === '-') return String(a - b)
-    return String(a + b)
+  function applyNumericOp(
+    left: EvalValue,
+    op: string,
+    right: EvalValue,
+  ): EvalValue {
+    if (isFormulaError(left.text)) return { text: left.text }
+    if (isFormulaError(right.text)) return { text: right.text }
+    const a = coerceNumeric(left)
+    const b = coerceNumeric(right)
+    if (a === null || b === null) return { text: '#VALUE!' }
+    if (op === '/') {
+      if (b === 0) return { text: '#DIV/0!' }
+      const out = a / b
+      return { text: Number.isFinite(out) ? String(out) : '#NUM!' }
+    }
+    const out = op === '*' ? a * b : op === '-' ? a - b : a + b
+    return {
+      text: Number.isFinite(out)
+        ? String(Object.is(out, -0) ? 0 : out)
+        : '#NUM!',
+    }
   }
 
-  function parseMultiplicative(): string | null {
+  function parseMultiplicative(): EvalValue | null {
     let left = parsePrimary()
     if (left === null) return null
     while (isOp('*') || isOp('/')) {
@@ -1897,7 +2512,7 @@ function evaluateExpressionString(
     return left
   }
 
-  function parseAdditive(): string | null {
+  function parseAdditive(): EvalValue | null {
     let left = parseMultiplicative()
     if (left === null) return null
     while (isOp('+') || isOp('-')) {
@@ -1910,23 +2525,23 @@ function evaluateExpressionString(
     return left
   }
 
-  function parseConcat(): string | null {
+  function parseConcat(): EvalValue | null {
     let left = parseAdditive()
     if (left === null) return null
     while (isOp('&')) {
       position += 1
       const right = parseAdditive()
       if (right === null) return null
-      if (isFormulaError(left)) return left
-      if (isFormulaError(right)) return right
-      left = `${left}${right}`
+      if (isFormulaError(left.text)) return { text: left.text }
+      if (isFormulaError(right.text)) return { text: right.text }
+      left = { text: `${left.text}${right.text}` }
     }
     return left
   }
 
   const result = parseConcat()
   if (result === null || position < tokens.length) return null
-  return result
+  return result.text
 }
 
 /**
@@ -1946,6 +2561,7 @@ function resolveCriteriaArg(sheet: WorkbookSheet, arg: string): string {
 function countIf(sheet: WorkbookSheet, args: string[]): string {
   const [rangeArg = '', criteriaArg = ''] = args
   const cellValues = expandRange(sheet, rangeArg.trim())
+  if (cellValues.length === 1 && cellValues[0] === '#NUM!') return '#NUM!'
   const criteria = resolveCriteriaArg(sheet, criteriaArg)
   const count = cellValues.filter(v => matchesCriteria(v, criteria)).length
   return String(count)
@@ -1957,8 +2573,9 @@ function sumIf(sheet: WorkbookSheet, args: string[]): string {
   const [sumSheet, sumRange] = sumRangeArg ? targetOf(sheet, sumRangeArg) : [rangeSheet, range]
   if (!rangeSheet || !sumSheet) return '#REF!'
   const rangeKeys = cellKeysInRange(range)
-  const criteria = resolveCriteriaArg(sheet, criteriaArg)
   const sumKeys = sumRangeArg ? cellKeysInRange(sumRange) : rangeKeys
+  if (rangeKeys === null || sumKeys === null) return '#NUM!'
+  const criteria = resolveCriteriaArg(sheet, criteriaArg)
   let total = 0
   rangeKeys.forEach((key, idx) => {
     if (matchesCriteria(rawCellValue(rangeSheet, key), criteria)) {
@@ -1974,8 +2591,9 @@ function averageIf(sheet: WorkbookSheet, args: string[]): string {
   const [avgSheet, avgRange] = avgRangeArg ? targetOf(sheet, avgRangeArg) : [rangeSheet, range]
   if (!rangeSheet || !avgSheet) return '#REF!'
   const rangeKeys = cellKeysInRange(range)
-  const criteria = resolveCriteriaArg(sheet, criteriaArg)
   const avgKeys = avgRangeArg ? cellKeysInRange(avgRange) : rangeKeys
+  if (rangeKeys === null || avgKeys === null) return '#NUM!'
+  const criteria = resolveCriteriaArg(sheet, criteriaArg)
   const matchedValues: number[] = []
   rangeKeys.forEach((key, idx) => {
     if (matchesCriteria(rawCellValue(rangeSheet, key), criteria)) {
@@ -1991,9 +2609,12 @@ function rank(sheet: WorkbookSheet, args: string[]): string {
   const [valueArg = '', refArg = ''] = args
   // order arg: 0 or omitted = descending, 1 = ascending
   const order = Number(resolveTextArg(sheet, args[2] ?? '0')) || 0
-  const target = Number(resolveTextArg(sheet, valueArg))
-  if (!Number.isFinite(target)) return '#VALUE'
-  const refValues = expandRange(sheet, refArg.replace(/\$/g, '').trim())
+  const targetRaw = resolveTextArg(sheet, valueArg)
+  const target = Number(targetRaw)
+  if (targetRaw.trim() === '' || !Number.isFinite(target)) return '#VALUE!'
+  const expanded = expandRange(sheet, refArg.replace(/\$/g, '').trim())
+  if (expanded.length === 1 && expanded[0] === '#NUM!') return '#NUM!'
+  const refValues = expanded
     .filter(value => value.trim() !== '')
     .map(Number)
     .filter(Number.isFinite)
@@ -2041,8 +2662,12 @@ function matchesCriteria(value: string, criteria: string): boolean {
   return value.toLowerCase() === criteria.toLowerCase()
 }
 
-// Returns cell key strings (A1, B2...) for every cell in a range token
-function cellKeysInRange(rangeToken: string): string[] {
+// Returns cell key strings (A1, B2...) for every cell in a range token,
+// or null when the range exceeds MAX_RANGE_EXPANSION_CELLS.
+function cellKeysInRange(
+  rangeToken: string,
+  maxCells = MAX_RANGE_EXPANSION_CELLS,
+): string[] | null {
   const normalised = rangeToken.replace(/\$/g, '')
   const range = /^([A-Z]+[0-9]+):([A-Z]+[0-9]+)$/i.exec(normalised)
   if (!range) {
@@ -2052,17 +2677,15 @@ function cellKeysInRange(rangeToken: string): string[] {
   const start = parseCellKey(range[1])
   const end = parseCellKey(range[2])
   if (!start || !end) return []
+  const minRow = Math.min(start.row, end.row)
+  const maxRow = Math.max(start.row, end.row)
+  const minCol = Math.min(start.column, end.column)
+  const maxCol = Math.max(start.column, end.column)
+  const count = (maxRow - minRow + 1) * (maxCol - minCol + 1)
+  if (!Number.isSafeInteger(count) || count > maxCells) return null
   const keys: string[] = []
-  for (
-    let row = Math.min(start.row, end.row);
-    row <= Math.max(start.row, end.row);
-    row++
-  ) {
-    for (
-      let col = Math.min(start.column, end.column);
-      col <= Math.max(start.column, end.column);
-      col++
-    ) {
+  for (let row = minRow; row <= maxRow; row++) {
+    for (let col = minCol; col <= maxCol; col++) {
       keys.push(cellKey(row, col))
     }
   }
@@ -2155,17 +2778,17 @@ function expandRange(sheet: WorkbookSheet, token: string): string[] {
   const start = parseCellKey(range[1])
   const end = parseCellKey(range[2])
   if (!start || !end) return []
+  const minRow = Math.min(start.row, end.row)
+  const maxRow = Math.max(start.row, end.row)
+  const minCol = Math.min(start.column, end.column)
+  const maxCol = Math.max(start.column, end.column)
+  const count = (maxRow - minRow + 1) * (maxCol - minCol + 1)
+  if (!Number.isSafeInteger(count) || count > MAX_RANGE_EXPANSION_CELLS) {
+    return ['#NUM!']
+  }
   const values: string[] = []
-  for (
-    let row = Math.min(start.row, end.row);
-    row <= Math.max(start.row, end.row);
-    row += 1
-  ) {
-    for (
-      let column = Math.min(start.column, end.column);
-      column <= Math.max(start.column, end.column);
-      column += 1
-    ) {
+  for (let row = minRow; row <= maxRow; row += 1) {
+    for (let column = minCol; column <= maxCol; column += 1) {
       values.push(rawCellValue(sheet, cellKey(row, column)))
     }
   }
@@ -2271,14 +2894,31 @@ function vlookup(sheet: WorkbookSheet, args: string[]): string {
   const [table, tableRange] = targetOf(sheet, rangeArg ?? '')
   if (!table) return '#REF!'
   const bounds = parseRange(tableRange)
-  const targetColumnOffset = Math.max(
-    0,
-    (Number(resolveTextArg(sheet, columnArg ?? '1')) || 1) - 1,
-  )
-  if (!bounds) return '#VALUE'
+  if (!bounds) return '#VALUE!'
+  const rawColText = resolveTextArg(sheet, columnArg ?? '1')
+  if (isFormulaError(rawColText)) return rawColText
+  const rawColNum = Number(rawColText)
+  if (rawColText.trim() === '' || !Number.isFinite(rawColNum)) return '#VALUE!'
+  const colIndexNum = Math.floor(rawColNum)
+  if (colIndexNum < 1) return '#VALUE!'
+  const tableWidth = bounds.end.column - bounds.start.column + 1
+  if (colIndexNum > tableWidth) return '#REF!'
+  const targetColumnOffset = colIndexNum - 1
   const lookupValue = resolveTextArg(sheet, lookupArg ?? '')
+  if (isFormulaError(lookupValue)) return lookupValue
+  const lookupLower = lookupValue.toLowerCase()
+  const lookupNumber = Number(lookupValue)
+  const lookupIsNumber = lookupValue.trim() !== '' && Number.isFinite(lookupNumber)
   for (let row = bounds.start.row; row <= bounds.end.row; row += 1) {
-    if (rawCellValue(table, cellKey(row, bounds.start.column)) === lookupValue) {
+    const candidate = rawCellValue(table, cellKey(row, bounds.start.column))
+    const candidateNumber = Number(candidate)
+    const matched =
+      lookupIsNumber &&
+      candidate.trim() !== '' &&
+      Number.isFinite(candidateNumber)
+        ? candidateNumber === lookupNumber
+        : candidate.toLowerCase() === lookupLower
+    if (matched) {
       return rawCellValue(
         table,
         cellKey(row, bounds.start.column + targetColumnOffset),
@@ -2307,18 +2947,31 @@ function touchDocument(document: PureSheetsDocument): PureSheetsDocument {
 
 function formatCellValue(value: string, style: SheetCell['style']): string {
   if (!style?.numberFormat || style.numberFormat === 'text') return value
-  if (value.startsWith('#')) return value
+  if (value.trim() === '') return value
+  if (isFormulaError(value)) return value
   const numeric = Number(value)
-  const decimals = style.decimals
+  const decimals =
+    style.decimals !== undefined && Number.isFinite(style.decimals)
+      ? Math.min(8, Math.max(0, Math.floor(style.decimals)))
+      : undefined
   if (style.numberFormat === 'number') {
     if (!Number.isFinite(numeric)) return value
     return decimals !== undefined ? numeric.toFixed(decimals) : String(numeric)
   }
-  if (style.numberFormat === 'currency') {
+  if (style.numberFormat === 'currency' || style.numberFormat === 'accounting') {
+    const currencyCode =
+      style.currencySymbol === '€'
+        ? 'EUR'
+        : style.currencySymbol === '£'
+        ? 'GBP'
+        : style.currencySymbol === '¥'
+        ? 'JPY'
+        : 'USD'
     return Number.isFinite(numeric)
       ? new Intl.NumberFormat('en-US', {
           style: 'currency',
-          currency: 'USD',
+          currency: currencyCode,
+          currencySign: style.numberFormat === 'accounting' ? 'accounting' : 'standard',
           ...(decimals !== undefined
             ? {
                 minimumFractionDigits: decimals,
@@ -2340,6 +2993,17 @@ function formatCellValue(value: string, style: SheetCell['style']): string {
             : { maximumFractionDigits: 2 }),
         }).format(numeric)
       : value
+  }
+  if (style.numberFormat === 'scientific') {
+    return Number.isFinite(numeric)
+      ? numeric.toExponential(decimals ?? 2).toUpperCase()
+      : value
+  }
+  if (style.numberFormat === 'time') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime())
+      ? value
+      : date.toISOString().slice(11, 19)
   }
   if (style.numberFormat === 'date') {
     const date = new Date(value)
@@ -2495,6 +3159,8 @@ export function applyAgentCellChangesDirect(
   const accepted = sanitizeAgentCellChanges(changes, sheet)
   let nextSheet = sheet
   let skippedLocked = 0
+  let maxRow = sheet.rowCount - 1
+  let maxColumn = sheet.columnCount - 1
   const logged: AgentLogCellChange[] = []
   for (const change of accepted) {
     if (isCellLocked(nextSheet, change.cell)) {
@@ -2505,6 +3171,11 @@ export function applyAgentCellChangesDirect(
     const candidate = upsertCell(nextSheet, change.cell, change.value)
     if (candidate === nextSheet) continue
     nextSheet = candidate
+    const pos = parseCellKey(change.cell)
+    if (pos) {
+      if (pos.row > maxRow) maxRow = pos.row
+      if (pos.column > maxColumn) maxColumn = pos.column
+    }
     logged.push({
       cell: change.cell,
       ...(before !== undefined ? { before } : {}),
@@ -2513,6 +3184,13 @@ export function applyAgentCellChangesDirect(
     })
   }
   if (!logged.length) return { document, applied: 0, skippedLocked }
+  if (maxRow + 1 > nextSheet.rowCount || maxColumn + 1 > nextSheet.columnCount) {
+    nextSheet = {
+      ...nextSheet,
+      rowCount: Math.max(nextSheet.rowCount, maxRow + 1),
+      columnCount: Math.max(nextSheet.columnCount, maxColumn + 1),
+    }
+  }
   let nextDocument = cloneWithUpdatedSheet(document, nextSheet)
   nextDocument = appendAgentLog(nextDocument, {
     agentName,
@@ -2542,7 +3220,7 @@ export function addChartToSheet(
   if (!sheet) return document
   const range = normalizeRangeToken(rangeToken)
   if (!range) return document
-  const chart = chartFromRange(sheet, range, type)
+  const chart = chartFromRange(sheet, range, type, document.workbook)
   if (!chart) return document
   const nextSheet: WorkbookSheet = {
     ...sheet,

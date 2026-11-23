@@ -130,12 +130,27 @@ export async function readBinaryFile(
   }
 }
 
+function isNotFoundError(error: unknown): boolean {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code ?? '')
+      : ''
+  if (code.toUpperCase() === 'ENOENT') return true
+  const message =
+    error instanceof Error ? error.message : String(error ?? '')
+  return /enoent|no such file|not found|does not exist|cannot find the (file|path)/i.test(
+    message,
+  )
+}
+
 /** Whether a file is there to read: a one-byte read, since the bridge has no stat. */
 export async function fileExists(path: string): Promise<boolean> {
   try {
-    return (await readBinaryFile(path, 1)).byteLength > 0
-  } catch {
-    return false
+    await readBinaryFile(path, 1)
+    return true
+  } catch (error) {
+    if (isNotFoundError(error)) return false
+    throw error
   }
 }
 

@@ -28,7 +28,9 @@ export function normalizeNamedRanges(value: unknown, sheets: readonly WorkbookSh
     const sheet = sheets.find(sheet => sheet.id === entry.sheetId)
     if (seen.has(key) || !sheet || !parseQualifiedRange(qualifiedRange(sheet.name, entry.range))) continue
     seen.add(key)
-    names.push({ name: entry.name, sheetId: entry.sheetId, range: entry.range })
+    const id = typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : `nr-${entry.name.toLowerCase()}`
+    const comment = typeof entry.comment === 'string' && entry.comment.trim() ? entry.comment : undefined
+    names.push({ id, name: entry.name.trim(), sheetId: entry.sheetId, range: entry.range, ...(comment ? { comment } : {}) })
   }
   return names.length ? names : undefined
 }

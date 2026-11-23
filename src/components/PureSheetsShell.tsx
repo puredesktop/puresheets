@@ -19,6 +19,7 @@ import {
 import {
   chooseSaveFilePath,
   fileExists,
+  isStandaloneDevMode,
   openImportFile,
   readBinaryFile,
   readClipboard,
@@ -30,13 +31,16 @@ import {
   writeTextFile,
 } from '../bridge/platformBridge'
 import type { PlatformOperationInput } from '../bridge/platformBridge'
+import { validateDocument } from '../lib/sheetsDocument'
 import { sheetsSnapshotHtml } from '../lib/sheetsSnapshot'
 import {
   readWorkbookFromPath,
+  validateSafeFilePath,
   workbookFilesForSave,
 } from '../lib/workbookFiles'
 import {
   createUniverSnapshot,
+  createWorkbookUnitId,
   documentFromEditorSnapshot,
   type PureSheetsUniverSnapshot,
 } from '../lib/univerAdapter'
@@ -49,6 +53,7 @@ import {
   cellKey,
   cellsInRange,
   clearRange,
+  clearRangeStyle,
   cloneWithUpdatedSheet,
   columnLabel,
   computedCellValue,
@@ -58,16 +63,22 @@ import {
   deleteRow,
   fillRange,
   findMatches,
+  hasMergeInRange,
   isCellLocked,
+  isColumnDeletionBlockedByProtection,
   isRangeLocked,
+  isRowDeletionBlockedByProtection,
   lockRange,
+  mergeRange,
   pasteCellBlock,
   replaceAllInSheet,
   setCellComment,
   setFilterQuery,
   setFilterHasHeader,
+  setFreezePanes,
   sheetHasPositionalMetadata,
   unlockRange,
+  unmergeRange,
   updateChart,
   deleteSheet as deleteWorkbookSheet,
   displayCellValue,
@@ -102,11 +113,38 @@ import {
   clearConditionalFormatsInRange,
   clearValidationInRange,
   invalidCellFlagsForSheet,
+  moveConditionalFormatRule,
+  removeConditionalFormatRule,
+  removeValidationRule,
   validateValue,
   validationRuleForCell,
   type InvalidCellFlag,
 } from '../lib/sheetDataFeatures'
-import { csvFromSheet, isDelimitedTextPath, sheetFromCsv, workbookFromCsv } from '../lib/csv'
+import {
+  activeFilterColumnIndices,
+  clearAllColumnFilters,
+  hideColumnsInSheet,
+  hideRowsInSheet,
+  moveSheetInWorkbook,
+  removeDuplicatesInRange,
+  setCellHyperlink,
+  setColumnFilter,
+  setSheetHidden,
+  setSheetTabColor,
+  sortRangeMulti,
+  splitTextToColumns,
+  toggleCheckboxInRange,
+  toggleSheetGridlines,
+  transposeCopiedBlock,
+  trimWhitespaceInRange,
+  unhideAllColumnsInSheet,
+  unhideAllRowsInSheet,
+  type SortKey,
+} from '../lib/dataTransforms'
+import { recomputeSheetCharts } from '../lib/chartEngine'
+import { deleteNamedRange, upsertNamedRange } from '../lib/formulaCatalog'
+import { computePivotSheet, inferPivotFields, isPivotStale } from '../lib/pivotEngine'
+import { csvFromSheet, isDelimitedTextPath, jsonFromSheet, sheetFromCsv, workbookFromCsv } from '../lib/csv'
 import {
   base64ToBytes,
   bytesToBase64,
@@ -114,9 +152,14 @@ import {
   importXlsxWorkbook,
 } from '../lib/xlsxIO'
 import type {
+  AgentLogEntry,
   CellStyle,
+  ColumnFilterRule,
   ConditionalFormatRule,
+  NamedRange,
+  PivotDefinition,
   PureSheetsDocument,
+  ValidationRule,
   WorkbookChart,
   WorkbookSheet,
 } from '../types'
@@ -134,8 +177,11 @@ import { ChartPanel, type ChartUpdatePatch } from './ChartPanel'
 import { analysisOptions, WorkbookAnalysisDialog, type AnalysisMode } from './WorkbookAnalysisDialog'
 import { ToolbarMenu } from './ToolbarMenu'
 import { FormulaBar } from './FormulaBar'
-import { SheetTabsBar } from './SheetTabsBar'
+import { SheetTabsBar, type StatPill } from './SheetTabsBar'
 import { UniverSpreadsheetSurface } from './UniverSpreadsheetSurface'
+import { CommandPalette, type PaletteCommand } from './CommandPalette'
+import { InspectorRail, type InspectorTab } from './InspectorRail'
+import type { BorderPreset } from './StylePopovers'
 import { workbookAgentRefs } from '../agentRefs'
 import type {
   UniverEditorBridge,
@@ -169,7 +215,22 @@ export function PureSheetsShell({
   onResourceHandled,
 }: PureSheetsShellProps): React.ReactElement {
   const compact = useCompactInRoom()
-  const [document, setDocumentState] = useState(initialDocument)
+  const [document, setDocumentState] = useState<PureSheetsDocument>(() => {
+    const existingSnap = initialDocument.engine.snapshot
+    const hasId =
+      typeof existingSnap === 'object' &&
+      existingSnap !== null &&
+      typeof (existingSnap as { id?: unknown }).id === 'string' &&
+      Boolean((existingSnap as { id: string }).id.trim())
+    if (hasId) return initialDocument
+    return {
+      ...initialDocument,
+      engine: {
+        ...initialDocument.engine,
+        snapshot: { id: createWorkbookUnitId() },
+      },
+    }
+  })
   const documentRef = useRef(document)
   const setDocument = useCallback(
     (
@@ -216,11 +277,43 @@ export function PureSheetsShell({
   // The cell the last Find landed on, so a repeat Find advances past it while a
   // fresh Find can still land on the cell you're currently sitting on (#277).
   const lastFindRef = useRef<string | null>(null)
-  const [undoStack, setUndoStack] = useState<PureSheetsDocument[]>([])
-  const [redoStack, setRedoStack] = useState<PureSheetsDocument[]>([])
+  const [undoStack, setUndoStackState] = useState<PureSheetsDocument[]>([])
+  const undoStackRef = useRef<PureSheetsDocument[]>([])
+  const [redoStack, setRedoStackState] = useState<PureSheetsDocument[]>([])
+  const redoStackRef = useRef<PureSheetsDocument[]>([])
+  const setUndoStack = useCallback(
+    (
+      update:
+        | PureSheetsDocument[]
+        | ((current: PureSheetsDocument[]) => PureSheetsDocument[]),
+    ): void => {
+      const next =
+        typeof update === 'function' ? update(undoStackRef.current) : update
+      undoStackRef.current = next
+      setUndoStackState(next)
+    },
+    [],
+  )
+  const setRedoStack = useCallback(
+    (
+      update:
+        | PureSheetsDocument[]
+        | ((current: PureSheetsDocument[]) => PureSheetsDocument[]),
+    ): void => {
+      const next =
+        typeof update === 'function' ? update(redoStackRef.current) : update
+      redoStackRef.current = next
+      setRedoStackState(next)
+    },
+    [],
+  )
+  const [findOpen, setFindOpen] = useState(false)
+  const [findFocusRequest, setFindFocusRequest] = useState(0)
   const [findText, setFindText] = useState('')
   const [replaceText, setReplaceText] = useState('')
   const [matchCase, setMatchCase] = useState(false)
+  const [sortHasHeader, setSortHasHeader] = useState(false)
+  const skipTitleBlurCommitRef = useRef(false)
   const [commentBarOpen, setCommentBarOpen] = useState(false)
   const [importWarnings, setImportWarnings] = useState<string[] | null>(null)
   const [warningsTitle, setWarningsTitle] = useState('Imported with limitations')
@@ -228,12 +321,18 @@ export function PureSheetsShell({
   const [renamingSheetId, setRenamingSheetId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [agentActivityOpen, setAgentActivityOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('rules')
+  const [formatPainterStyle, setFormatPainterStyle] = useState<CellStyle | null>(null)
+  const [showFormulas, setShowFormulas] = useState(false)
+  const [zoom, setZoom] = useState(1)
   const [univerSurfaceRevision, setUniverSurfaceRevision] = useState(0)
   const [selectedRange, setSelectedRange] = useState('A1:A1')
   const [univerSelection, setUniverSelection] =
     useState<UniverSelectionState | null>(null)
   useSheetsAgentTools(
-    true,
+    !isStandaloneDevMode(),
     {
       document,
       setDocument: updater => {
@@ -241,8 +340,9 @@ export function PureSheetsShell({
           throw Error(
             'The workbook changed while the tool was running. Read its current context again.',
           )
-        commitDocument(updater)
-        refreshUniverSurface()
+        if (commitDocument(updater)) {
+          refreshUniverSurface()
+        }
       },
       filePath,
       currentFilePath: () => boundPathRef.current ?? '',
@@ -250,14 +350,16 @@ export function PureSheetsShell({
       autoFitRows: async (sheetId, rows) =>
         (await univerEditorRef.current?.autoFitRows(sheetId, rows)) ?? false,
       openWorkbook: async path => {
-        if (!await openWorkbookPath(path)) throw Error('A newer workbook request superseded this open. Try again.')
-        return { title: documentRef.current.metadata.title, sourcePath: path, filePath: boundPathRef.current ?? null, warnings: importWarningsRef.current }
+        const safePath = validateSafeFilePath(path)
+        if (!await openWorkbookPath(safePath)) throw Error('A newer workbook request superseded this open. Try again.')
+        return { title: documentRef.current.metadata.title, sourcePath: safePath, filePath: boundPathRef.current ?? null, warnings: importWarningsRef.current }
       },
       saveAsXlsx: async (path, overwrite) => {
-        if (!/\.xlsx$/i.test(path)) throw Error('The Excel path must end in .xlsx.')
-        if (!overwrite && (await fileExists(path)))
-          throw Error(`${fileNameFromPath(path)} already exists. Choose another path, or pass overwrite: true if the user asked to replace it.`)
-        return exportXlsxToPath(path)
+        const safePath = validateSafeFilePath(path, { requireAbsolute: true })
+        if (!/\.xlsx$/i.test(safePath)) throw Error('The Excel path must end in .xlsx.')
+        if (!overwrite && (await fileExists(safePath)))
+          throw Error(`${fileNameFromPath(safePath)} already exists. Choose another path, or pass overwrite: true if the user asked to replace it.`)
+        return exportXlsxToPath(safePath)
       },
       createWorkbook: async title => {
         const fresh = createBlankWorkbook(title)
@@ -397,17 +499,27 @@ export function PureSheetsShell({
   // A workbook the organisation shares, edited live (useLiveJson): everyone's cells merged cell by cell; the live
   // copy writes the workbook, so this tab stops saving it itself while live.
   const livePath = filePath && boundIsPackageRef.current && boundPathRef.current === filePath ? `${filePath}/workbook.json` : null
-  const applyingRemoteRef = useRef(false)
+  const lastRemoteDocRef = useRef<PureSheetsDocument | null>(null)
   const live = useLiveJson(livePath, {
     loadSaved: async path => JSON.parse(await readTextFile(path)) as Record<string, unknown>,
     onRemote: next => {
-      // Someone else's change: the whole workbook as it is now, put on screen as an opened one is.
-      applyingRemoteRef.current = true
-      const doc = next as unknown as PureSheetsDocument
-      setDocument(doc)
-      boundDocRef.current = doc
-      refreshUniverSurface()
-      applyingRemoteRef.current = false
+      // Someone else's change: validate untrusted remote JSON before applying
+      // so malformed payloads never corrupt local state, and record the
+      // reference so the dirty-save effect never echoes it back.
+      try {
+        const doc = validateDocument(next)
+        lastRemoteDocRef.current = doc
+        setDocument(doc)
+        boundDocRef.current = doc
+        setSaveState('saved')
+        refreshUniverSurface()
+      } catch (error) {
+        setStatusMessage(
+          `Ignored invalid remote update: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
     },
     serialize: () => ({
       resourcePath: boundPathRef.current ?? filePath,
@@ -427,12 +539,16 @@ export function PureSheetsShell({
     boundDocRef.current = document
     // Live: the change goes to everyone; the live copy writes the workbook when it is time.
     if (liveRef.current.status === 'on') {
-      if (!applyingRemoteRef.current) liveRef.current.write(JSON.parse(JSON.stringify(document)) as Record<string, unknown>)
+      if (document !== lastRemoteDocRef.current) {
+        liveRef.current.write(
+          JSON.parse(JSON.stringify(document)) as Record<string, unknown>,
+        )
+      }
       setSaveState('saved')
       return
     }
     lifecycleRef.current.markDirty()
-  }, [document, filePath, saveState])
+  }, [document, filePath, saveState, setSaveState])
 
   // Never let a previous savedAt turn a failed write into a success indication.
   useEffect(() => {
@@ -470,8 +586,8 @@ export function PureSheetsShell({
     }).join(' ')
   }, [activeSheet])
   const visibleRows = useMemo(
-    () => visibleRowsForSheet(activeSheet),
-    [activeSheet],
+    () => visibleRowsForSheet(activeSheet, document.workbook),
+    [activeSheet, document.workbook],
   )
   const univerSnapshot = useMemo(() => {
     return isUniverSnapshot(document.engine.snapshot)
@@ -485,11 +601,12 @@ export function PureSheetsShell({
   // pointing at unloaded (blank) content.
   const openWorkbookPath = useCallback(
     async (resourcePath: string): Promise<boolean> => {
-      if (/\.xlsx$/i.test(resourcePath)) return importXlsxPath(resourcePath)
-      if (isDelimitedTextPath(resourcePath)) return importCsvPath(resourcePath)
+      const safePath = validateSafeFilePath(resourcePath)
+      if (/\.xlsx$/i.test(safePath)) return importXlsxPath(safePath)
+      if (isDelimitedTextPath(safePath)) return importCsvPath(safePath)
       setStatusMessage('Opening workbook…')
       const opened = await transitions.run(
-        () => readWorkbookFromPath(resourcePath, readTextFile),
+        () => readWorkbookFromPath(safePath, readTextFile),
         loaded => {
           importWarningsRef.current = []
           setImportWarnings(null)
@@ -621,18 +738,19 @@ export function PureSheetsShell({
   function commitDocument(
     updater: (current: PureSheetsDocument) => PureSheetsDocument,
     message?: string,
-  ): void {
+  ): boolean {
     if (transitions.busy)
       throw Error('Wait for the workbook to finish opening before editing.')
     const current = documentRef.current
     const next = updater(current)
-    if (next === current) return
+    if (next === current) return false
     setUndoStack(stack => [...stack, current].slice(-50))
     setRedoStack([])
     setDocument(next)
     boundDocRef.current = next
     setSaveState('dirty')
     if (message) setStatusMessage(message)
+    return true
   }
 
   function refreshUniverSurface(): void {
@@ -642,7 +760,11 @@ export function PureSheetsShell({
   function updateActiveSheet(nextSheet: WorkbookSheet, message?: string): void {
     if (transitions.busy || workbookVersion !== transitions.version) return
     commitDocument(
-      current => cloneWithUpdatedSheet(current, nextSheet),
+      current =>
+        cloneWithUpdatedSheet(
+          current,
+          recomputeSheetCharts(nextSheet, current.workbook),
+        ),
       message,
     )
   }
@@ -657,7 +779,11 @@ export function PureSheetsShell({
         current.workbook.sheets.find(
           sheet => sheet.id === current.workbook.activeSheetId,
         ) ?? current.workbook.sheets[0]
-      return cloneWithUpdatedSheet(current, updater(currentSheet))
+      const updated = updater(currentSheet)
+      return cloneWithUpdatedSheet(
+        current,
+        recomputeSheetCharts(updated, current.workbook),
+      )
     }, message)
   }
 
@@ -763,8 +889,12 @@ export function PureSheetsShell({
     if (template === 'RIGHT') return `=RIGHT(${cell}, 3)`
     if (template === 'VLOOKUP')
       return `=VLOOKUP(${cell}, ${referenceRange}, 2, FALSE)`
+    if (template === 'XLOOKUP')
+      return `=XLOOKUP(${cell}, ${referenceRange}, ${referenceRange}, "")`
     if (template === 'COUNTIF') return `=COUNTIF(${referenceRange}, ">0")`
     if (template === 'SUMIF') return `=SUMIF(${referenceRange}, ">0")`
+    if (template === 'SUMIFS')
+      return `=SUMIFS(${referenceRange}, ${referenceRange}, ">0")`
     if (template === 'AVERAGEIF') return `=AVERAGEIF(${referenceRange}, ">0")`
     if (template === 'RANK') return `=RANK(${cell}, ${referenceRange})`
     if (template === 'IFERROR') return `=IFERROR(${cell}, "")`
@@ -834,6 +964,16 @@ export function PureSheetsShell({
     setEditValue(value)
   }
 
+  function cancelFormulaEdit(): void {
+    formulaDraftRef.current = null
+    formulaRangePickRef.current = null
+    if (formulaRangePickTimeoutRef.current) {
+      window.clearTimeout(formulaRangePickTimeoutRef.current)
+      formulaRangePickTimeoutRef.current = undefined
+    }
+    setEditValue(activeSheet.cells[selectedCell]?.value ?? '')
+  }
+
   function undo(): void {
     // If the user is mid-typing in a cell (edit box open, not yet committed),
     // the first undo cancels that uncommitted edit instead of reaching back
@@ -845,19 +985,20 @@ export function PureSheetsShell({
       setStatusMessage('Discarded unsaved cell edit')
       return
     }
-    setUndoStack(stack => {
-      const previous = stack.at(-1)
-      if (!previous) return stack
-      setRedoStack(redo => [document, ...redo].slice(0, 50))
-      setDocument(previous)
-      // Rebuild the Univer surface from the restored document — without this
-      // the grid keeps showing the un-undone state and the next grid command
-      // re-exports it, silently re-committing the undone edit.
-      refreshUniverSurface()
-      setSaveState('dirty')
-      setStatusMessage('Undid last edit')
-      return stack.slice(0, -1)
-    })
+    const stack = undoStackRef.current
+    const previous = stack.at(-1)
+    if (!previous) return
+    const current = documentRef.current
+    setUndoStack(stack.slice(0, -1))
+    setRedoStack([current, ...redoStackRef.current].slice(0, 50))
+    setDocument(previous)
+    boundDocRef.current = previous
+    // Rebuild the Univer surface from the restored document — without this
+    // the grid keeps showing the un-undone state and the next grid command
+    // re-exports it, silently re-committing the undone edit.
+    refreshUniverSurface()
+    setSaveState('dirty')
+    setStatusMessage('Undid last edit')
   }
 
   function redo(): void {
@@ -869,16 +1010,17 @@ export function PureSheetsShell({
       setStatusMessage('Discarded unsaved cell edit')
       return
     }
-    setRedoStack(stack => {
-      const next = stack[0]
-      if (!next) return stack
-      setUndoStack(undoItems => [...undoItems, document].slice(-50))
-      setDocument(next)
-      refreshUniverSurface()
-      setSaveState('dirty')
-      setStatusMessage('Redid edit')
-      return stack.slice(1)
-    })
+    const stack = redoStackRef.current
+    const next = stack[0]
+    if (!next) return
+    const current = documentRef.current
+    setRedoStack(stack.slice(1))
+    setUndoStack([...undoStackRef.current, current].slice(-50))
+    setDocument(next)
+    boundDocRef.current = next
+    refreshUniverSurface()
+    setSaveState('dirty')
+    setStatusMessage('Redid edit')
   }
 
   function reportFailure(error: unknown): void {
@@ -1069,33 +1211,124 @@ export function PureSheetsShell({
     },
   })
 
-  // ⌘/Ctrl+D fill down, ⌘/Ctrl+R fill right. Skips text-entry targets and
-  // events another handler (e.g. the Univer editor's own shortcuts) already
-  // claimed via preventDefault.
+  // Single stable ref-backed shortcut handler (`[]` deps):
+  // ⌘/Ctrl+K (Palette), ⌘/Ctrl+F/H (Find/Replace), Ctrl+` (Show Formulas),
+  // ⌘/Ctrl+Z (Undo), ⌘/Ctrl+Shift+Z / Ctrl+Y (Redo), ⌘/Ctrl+Shift+V (Paste Values),
+  // ⌘/Ctrl+Shift+L (Toggle Filter), ⌘/Ctrl+B/I/U (Bold/Italic/Underline), ⌘/Ctrl+D/R (Fill).
+  const shortcutHandlersRef = useRef({
+    switcherOpen: false,
+    togglePalette: () => {},
+    openFind: () => {},
+    toggleShowFormulas: () => {},
+    undo: () => {},
+    redo: () => {},
+    pasteValues: () => {},
+    toggleFilter: () => {},
+    toggleStyle: (_style: 'bold' | 'italic' | 'underline') => {},
+    fillSelectedRange: (_dir: 'down' | 'right') => {},
+  })
+  shortcutHandlersRef.current = {
+    switcherOpen,
+    togglePalette: () => setPaletteOpen(open => !open),
+    openFind: () => {
+      setFindOpen(true)
+      setFindFocusRequest(count => count + 1)
+    },
+    toggleShowFormulas: () => setShowFormulas(prev => !prev),
+    undo,
+    redo,
+    pasteValues: () => pasteSpecial('values'),
+    toggleFilter: () => {
+      const next = toggleFilterRow(activeSheet, selectedPosition?.column ?? 0)
+      updateActiveSheet(next, 'Toggled filter row')
+      applyFilterToEditor(next)
+    },
+    toggleStyle,
+    fillSelectedRange,
+  }
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
-        return
-      const key = event.key.toLowerCase()
-      if (key !== 'd' && key !== 'r') return
       if (event.defaultPrevented) return
+      const handlers = shortcutHandlersRef.current
+      if (handlers.switcherOpen) return
       const target = event.target as HTMLElement | null
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.isContentEditable)
-      ) {
+      if (typeof target?.closest === 'function' && target.closest('[role="dialog"]')) return
+      const key = event.key.toLowerCase()
+      const mod = event.metaKey || event.ctrlKey
+      if (event.ctrlKey && !event.metaKey && !event.altKey && key === '`') {
+        event.preventDefault()
+        handlers.toggleShowFormulas()
         return
       }
-      event.preventDefault()
-      fillSelectedRange(key === 'd' ? 'down' : 'right')
+      if (!mod || event.altKey) return
+      const inTextTarget = Boolean(
+        target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.isContentEditable),
+      )
+      if (!event.shiftKey && key === 'k') {
+        event.preventDefault()
+        handlers.togglePalette()
+        return
+      }
+      if (!event.shiftKey && key === 'f') {
+        event.preventDefault()
+        handlers.openFind()
+        return
+      }
+      if (inTextTarget || univerEditorRef.current?.isCellEditing()) return
+      if (!event.shiftKey && key === 'h') {
+        event.preventDefault()
+        handlers.openFind()
+        return
+      }
+      if (key === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) handlers.redo()
+        else handlers.undo()
+        return
+      }
+      if (!event.shiftKey && key === 'y') {
+        event.preventDefault()
+        handlers.redo()
+        return
+      }
+      if (event.shiftKey && key === 'v') {
+        event.preventDefault()
+        handlers.pasteValues()
+        return
+      }
+      if (event.shiftKey && key === 'l') {
+        event.preventDefault()
+        handlers.toggleFilter()
+        return
+      }
+      if (event.shiftKey) return
+      if (key === 'b') {
+        event.preventDefault()
+        handlers.toggleStyle('bold')
+      } else if (key === 'i') {
+        event.preventDefault()
+        handlers.toggleStyle('italic')
+      } else if (key === 'u') {
+        event.preventDefault()
+        handlers.toggleStyle('underline')
+      } else if (key === 'd') {
+        event.preventDefault()
+        handlers.fillSelectedRange('down')
+      } else if (key === 'r') {
+        event.preventDefault()
+        handlers.fillSelectedRange('right')
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  })
+  }, [])
 
-  function toggleStyle(style: 'bold' | 'italic' | 'underline'): void {
+  function toggleStyle(
+    style: 'bold' | 'italic' | 'underline' | 'strikethrough',
+  ): void {
     const range = activeRange()
     if (!range) return
     const current = Boolean(activeSheet.cells[selectedCell]?.style?.[style])
@@ -1181,8 +1414,61 @@ export function PureSheetsShell({
     )
   }
 
+  function clearSelectedFormatting(): void {
+    const range = activeRange()
+    if (!range) return
+    updateActiveSheetFromCurrent(
+      sheet => clearRangeStyle(sheet, range),
+      `Cleared formatting in ${range}`,
+    )
+    refreshUniverSurface()
+  }
+
+  function toggleMergeSelectedRange(): void {
+    const range = activeRange()
+    if (!range) return
+    if (isRangeLocked(activeSheet, range)) {
+      setStatusMessage(`${range} contains protected cells — merge refused`)
+      return
+    }
+    const merged = hasMergeInRange(activeSheet, range)
+    const editor = univerEditorRef.current
+    if (merged) {
+      if (editor?.unmergeRange) {
+        void editor.unmergeRange(range).then(ok => {
+          if (!ok) {
+            updateActiveSheetFromCurrent(sheet => unmergeRange(sheet, range), `Unmerged ${range}`)
+            refreshUniverSurface()
+          }
+        })
+      } else {
+        updateActiveSheetFromCurrent(sheet => unmergeRange(sheet, range), `Unmerged ${range}`)
+        refreshUniverSurface()
+      }
+      setStatusMessage(`Unmerged ${range}`)
+      return
+    }
+    const [startKey, endKey] = range.split(':')
+    if (startKey === endKey) {
+      setStatusMessage('Select multiple cells to merge')
+      return
+    }
+    if (editor?.mergeRange) {
+      void editor.mergeRange(range).then(ok => {
+        if (!ok) {
+          updateActiveSheetFromCurrent(sheet => mergeRange(sheet, range), `Merged ${range}`)
+          refreshUniverSurface()
+        }
+      })
+    } else {
+      updateActiveSheetFromCurrent(sheet => mergeRange(sheet, range), `Merged ${range}`)
+      refreshUniverSurface()
+    }
+    setStatusMessage(`Merged ${range}`)
+  }
+
   function addSheet(): void {
-    const name = `Sheet ${document.workbook.sheets.length + 1}`
+    const name = uniqueSheetName(`Sheet ${documentRef.current.workbook.sheets.length + 1}`)
     const message = 'Added sheet'
     const record = () =>
       recordLedgerOperation({
@@ -1264,6 +1550,19 @@ export function PureSheetsShell({
     const sheetId = renamingSheetId
     cancelSheetRename()
     if (!nextName) return
+    const currentSheets = documentRef.current.workbook.sheets
+    const targetSheet = currentSheets.find(s => s.id === sheetId)
+    if (!targetSheet || targetSheet.name === nextName) return
+    if (
+      currentSheets.some(
+        sheet =>
+          sheet.id !== sheetId &&
+          sheet.name.toLowerCase() === nextName.toLowerCase(),
+      )
+    ) {
+      setStatusMessage(`A sheet named "${nextName}" already exists`)
+      return
+    }
     const message = 'Renamed sheet'
     const record = () =>
       recordLedgerOperation({
@@ -1271,13 +1570,23 @@ export function PureSheetsShell({
         kind: 'sheets.sheet.rename',
         summary: `Renamed a sheet to "${nextName}"`,
       })
-    const fallback = () =>
-      commitDocument(
-        current => renameWorkbookSheet(current, sheetId, nextName),
-        message,
-      )
+    const fallback = () => {
+      if (
+        commitDocument(
+          current => renameWorkbookSheet(current, sheetId, nextName),
+          message,
+        )
+      ) {
+        refreshUniverSurface()
+      }
+    }
+    const hasCrossSheetFormulas = currentSheets.some(sheet =>
+      Object.values(sheet.cells).some(
+        cell => cell.kind === 'formula' && cell.value.includes('!'),
+      ),
+    )
     const editor = univerEditorRef.current
-    if (!editor) {
+    if (!editor || hasCrossSheetFormulas) {
       fallback()
       record()
       return
@@ -1322,7 +1631,10 @@ export function PureSheetsShell({
   }
 
   function deleteCurrentSheet(): void {
-    if (document.workbook.sheets.length <= 1) return
+    const nonDraftSheets = documentRef.current.workbook.sheets.filter(
+      sheet => !sheet.agentDraft,
+    )
+    if (nonDraftSheets.length <= 1) return
     const message = 'Deleted sheet'
     const deletedName = activeSheet.name
     const record = () =>
@@ -1429,26 +1741,35 @@ export function PureSheetsShell({
   async function copySelectedRange(cut = false): Promise<void> {
     const range = activeRange()
     if (!range) return
-    let text = rangeToDelimitedText(activeSheet, range)
+    if (cut && isRangeLocked(activeSheet, range)) {
+      setStatusMessage(`${range} contains protected cells — cut refused`)
+      return
+    }
+    let text = rangeToDelimitedText(activeSheet, range, document.workbook)
     // Capture the rich block BEFORE a cut clears the source cells.
-    let block = copyRangeCells(activeSheet, range)
+    let block = copyRangeCells(activeSheet, range, document.workbook)
     const copyRequest = ++copyRequestRef.current
     const version = transitions.version
     try {
       let html: string | undefined
       let live = false
       if (!cut) {
-        // Publish a durable source before putting a link on the clipboard. A
-        // draft is sufficient; users need not interrupt copying to choose a file.
+        // Publish a durable source before putting a link on the clipboard.
+        // Skip redundant disk writes when already bound & cleanly saved.
         try {
           await captureEditorWorkbook()
           if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
           const snapshot = documentRef.current
           const sourceSheet = snapshot.workbook.sheets.find(sheet => sheet.id === activeSheet.id)
           if (!sourceSheet) return
-          text = rangeToDelimitedText(sourceSheet, range)
-          block = copyRangeCells(sourceSheet, range)
-          const path = await persistWorkbook(snapshot)
+          text = rangeToDelimitedText(sourceSheet, range, snapshot.workbook)
+          block = copyRangeCells(sourceSheet, range, snapshot.workbook)
+          const path =
+            boundPathRef.current &&
+            saveStateRef.current === 'saved' &&
+            !lifecycleRef.current.doc.saving
+              ? boundPathRef.current
+              : await persistWorkbook(snapshot)
           if (copyRequest !== copyRequestRef.current || version !== transitions.version) return
           const reference: LinkedTableReference = { version: 1, path,
             file: boundIsPackageRef.current ? 'workbook.json' : null, tableId: activeSheet.id, range }
@@ -1510,8 +1831,8 @@ export function PureSheetsShell({
   function captureEditorClipboard(cut = false): void {
     const range = normalizeRangeToken(selectedRange)
     if (!range) return
-    copiedBlockRef.current = copyRangeCells(activeSheet, range)
-    copiedTextRef.current = rangeToDelimitedText(activeSheet, range)
+    copiedBlockRef.current = copyRangeCells(activeSheet, range, document.workbook)
+    copiedTextRef.current = rangeToDelimitedText(activeSheet, range, document.workbook)
     if (!cut) void copySelectedRange()
   }
 
@@ -1643,6 +1964,12 @@ export function PureSheetsShell({
   function deleteSelectedRow(): void {
     if (!selectedPosition) return
     const row = selectedPosition.row
+    if (isRowDeletionBlockedByProtection(activeSheet, row)) {
+      setStatusMessage(
+        `Row ${row + 1} contains protected cells — delete refused`,
+      )
+      return
+    }
     const nextRow = Math.min(row, Math.max(0, activeSheet.rowCount - 2))
     const nextCell = cellKey(nextRow, selectedPosition.column)
     const message = `Deleted row ${row + 1}`
@@ -1693,6 +2020,12 @@ export function PureSheetsShell({
   function deleteSelectedColumn(): void {
     if (!selectedPosition) return
     const column = selectedPosition.column
+    if (isColumnDeletionBlockedByProtection(activeSheet, column)) {
+      setStatusMessage(
+        `Column ${columnLabel(column)} contains protected cells — delete refused`,
+      )
+      return
+    }
     const nextColumn = Math.min(
       column,
       Math.max(0, activeSheet.columnCount - 2),
@@ -1760,6 +2093,124 @@ export function PureSheetsShell({
       .catch(fallback)
   }
 
+  function autoFitSelectedRows(): void {
+    const range = activeRange()
+    if (!range) return
+    const [startKey, endKey] = range.split(':')
+    const start = parseCellKey(startKey ?? '')
+    const end = parseCellKey(endKey ?? startKey ?? '')
+    if (!start || !end) return
+    if (activeSheet.protection?.lockedRanges?.length) {
+      setStatusMessage('Auto-fit row height is refused on protected sheets')
+      return
+    }
+    const rowSpan = end.row - start.row + 1
+    if (rowSpan > 500) {
+      setStatusMessage('Select at most 500 rows to auto-fit at once')
+      return
+    }
+    const rows: number[] = []
+    for (let r = start.row; r <= end.row; r += 1) rows.push(r)
+    const fallback = (): void => {
+      updateActiveSheetFromCurrent(sheet => {
+        const maxLinesByRow = new Map<number, number>()
+        for (const k of Object.keys(sheet.cells)) {
+          const pos = parseCellKey(k)
+          if (!pos || pos.row < start.row || pos.row > end.row) continue
+          const text = displayCellValue(sheet, k, documentRef.current.workbook)
+          const colWidth = sheet.columnWidths?.[String(pos.column)] ?? 112
+          const charsPerLine = Math.max(8, Math.floor((colWidth - 16) / 7))
+          const lines = text
+            .split('\n')
+            .reduce(
+              (sum, part) =>
+                sum + Math.max(1, Math.ceil(part.length / charsPerLine)),
+              0,
+            )
+          const prev = maxLinesByRow.get(pos.row) ?? 1
+          if (lines > prev) maxLinesByRow.set(pos.row, lines)
+        }
+        const nextRowHeights: Record<string, number> = { ...sheet.rowHeights }
+        for (const r of rows) {
+          const lines = maxLinesByRow.get(r) ?? 1
+          nextRowHeights[String(r)] = Math.min(160, Math.max(24, Math.max(28, lines * 20 + 10)))
+        }
+        return { ...sheet, rowHeights: nextRowHeights }
+      }, `Auto-fitted row height for ${range}`)
+      refreshUniverSurface()
+    }
+    const editor = univerEditorRef.current
+    if (!editor) {
+      fallback()
+      return
+    }
+    void editor
+      .autoFitRows(activeSheet.id, rows)
+      .then(applied => {
+        if (applied) setStatusMessage(`Auto-fitted row height for ${range}`)
+        else fallback()
+      })
+      .catch(fallback)
+  }
+
+  function autoFitSelectedColumns(): void {
+    const range = activeRange()
+    if (!range) return
+    const [startKey, endKey] = range.split(':')
+    const start = parseCellKey(startKey ?? '')
+    const end = parseCellKey(endKey ?? startKey ?? '')
+    if (!start || !end) return
+    if (activeSheet.protection?.lockedRanges?.length) {
+      setStatusMessage('Auto-fit column width is refused on protected sheets')
+      return
+    }
+    const colSpan = end.column - start.column + 1
+    if (colSpan > 500) {
+      setStatusMessage('Select at most 500 columns to auto-fit at once')
+      return
+    }
+    const columns: number[] = []
+    for (let c = start.column; c <= end.column; c += 1) columns.push(c)
+    const fallback = (): void => {
+      updateActiveSheetFromCurrent(sheet => {
+        const maxCharsByCol = new Map<number, number>()
+        for (const key of Object.keys(sheet.cells)) {
+          const pos = parseCellKey(key)
+          if (!pos || pos.column < start.column || pos.column > end.column) continue
+          const text = displayCellValue(
+            sheet,
+            key,
+            documentRef.current.workbook,
+          )
+          const longestLine = text
+            .split('\n')
+            .reduce((m, line) => Math.max(m, line.length), 0)
+          const prev = maxCharsByCol.get(pos.column) ?? 6
+          if (longestLine > prev) maxCharsByCol.set(pos.column, longestLine)
+        }
+        const nextColumnWidths: Record<string, number> = { ...sheet.columnWidths }
+        for (const c of columns) {
+          const maxChars = maxCharsByCol.get(c) ?? 6
+          nextColumnWidths[String(c)] = Math.min(360, Math.max(72, maxChars * 8 + 24))
+        }
+        return { ...sheet, columnWidths: nextColumnWidths }
+      }, `Auto-fitted column width for ${range}`)
+      refreshUniverSurface()
+    }
+    const editor = univerEditorRef.current
+    if (!editor?.autoFitColumns) {
+      fallback()
+      return
+    }
+    void editor
+      .autoFitColumns(activeSheet.id, columns)
+      .then(applied => {
+        if (applied) setStatusMessage(`Auto-fitted column width for ${range}`)
+        else fallback()
+      })
+      .catch(fallback)
+  }
+
   function activeRange(): string | null {
     const normalized = normalizeRangeToken(selectedRange)
     if (!normalized) setStatusMessage(`Invalid range ${selectedRange}`)
@@ -1770,22 +2221,7 @@ export function PureSheetsShell({
     sheet: WorkbookSheet,
     range: string,
   ): UniverPasteValue[][] {
-    const keys = cellsInRange(range)
-    const rows: UniverPasteValue[][] = []
-    let currentRow = -1
-    for (const key of keys) {
-      const position = parseCellKey(key)
-      if (!position) continue
-      if (position.row !== currentRow) {
-        rows.push([])
-        currentRow = position.row
-      }
-      const value = sheet.cells[key]?.value ?? ''
-      rows[rows.length - 1].push(
-        value.trim().startsWith('=') ? { f: value } : value,
-      )
-    }
-    return rows
+    return sortedRangeCellValues(sheet, range)
   }
 
   // The sorted block as a typed Univer value matrix: numbers stay numbers,
@@ -1809,9 +2245,16 @@ export function PureSheetsShell({
       let value: UniverPasteValue = null
       if (cell && cell.value !== '') {
         if (cell.kind === 'formula') value = { f: cell.value }
-        else if (cell.kind === 'number' && Number.isFinite(Number(cell.value)))
+        else if (
+          cell.kind === 'number' &&
+          Number.isFinite(Number(cell.value)) &&
+          (!Number.isInteger(Number(cell.value)) ||
+            Number.isSafeInteger(Number(cell.value)))
+        ) {
           value = Number(cell.value)
-        else value = cell.value
+        } else {
+          value = cell.value
+        }
       }
       rows[rows.length - 1].push(value)
     }
@@ -1826,11 +2269,19 @@ export function PureSheetsShell({
       return
     }
     const message = `Sorted ${range}`
+    const sortOpts = { hasHeader: sortHasHeader }
     // No canvas (tests, mount failure) or the bridge refused the write: sort
     // the model and rebuild the surface from it.
     const modelFallback = (): void => {
       updateActiveSheetFromCurrent(
-        sheet => sortRange(sheet, range, direction),
+        sheet =>
+          sortRange(
+            sheet,
+            range,
+            direction,
+            documentRef.current.workbook,
+            sortOpts,
+          ),
         message,
       )
       refreshUniverSurface()
@@ -1840,13 +2291,6 @@ export function PureSheetsShell({
       modelFallback()
       return
     }
-    // Canvas path: flush the live canvas into a document first so the sort
-    // reads exactly what the user sees (the debounced model sync can trail
-    // recent edits), then write the sorted block back through the bridge —
-    // the same path replace and paste use. The canvas never reloads, so the
-    // selection, scroll position and rendered formatting stay put; the old
-    // full-surface reload reset the selection to A1 and flashed the grid on
-    // every sort (#275).
     const flushed = await editor.flushSnapshot().catch(() => null)
     const sourceDocument = flushed
       ? documentFromEditorSnapshot(flushed, documentRef.current)
@@ -1855,8 +2299,27 @@ export function PureSheetsShell({
       sourceDocument.workbook.sheets.find(
         sheet => sheet.id === activeSheet.id,
       ) ?? activeSheet
-    const nextSheet = sortRange(sourceSheet, range, direction)
+    const nextSheet = sortRange(
+      sourceSheet,
+      range,
+      direction,
+      sourceDocument.workbook,
+      sortOpts,
+    )
     if (nextSheet === sourceSheet) return
+    // Value-only bridge writes drop moved cell styles and comments; refresh
+    // via model when sorted cells carry styles or comments.
+    const rangeKeys = cellsInRange(range, 50_000)
+    const hasStylesOrComments = rangeKeys.some(
+      key =>
+        Boolean(sourceSheet.cells[key]?.style) ||
+        Boolean(sourceSheet.comments?.[key]),
+    )
+    if (hasStylesOrComments) {
+      updateActiveSheet(nextSheet, message)
+      refreshUniverSurface()
+      return
+    }
     void editor
       .setRangeValues(range, sortedRangeCellValues(nextSheet, range))
       .then(applied => {
@@ -1869,7 +2332,12 @@ export function PureSheetsShell({
   function createChart(type: WorkbookChart['type']): void {
     const range = activeRange()
     if (!range) return
-    const nextSheet = createChartFromRange(activeSheet, range, type)
+    const nextSheet = createChartFromRange(
+      activeSheet,
+      range,
+      type,
+      document.workbook,
+    )
     if (nextSheet === activeSheet) {
       setStatusMessage(`No numeric chart data found in ${range}`)
       return
@@ -1887,7 +2355,7 @@ export function PureSheetsShell({
   }
 
   function updateChartConfig(chartId: string, patch: ChartUpdatePatch): void {
-    const next = updateChart(activeSheet, chartId, patch)
+    const next = updateChart(activeSheet, chartId, patch, document.workbook)
     if (next === activeSheet) {
       setStatusMessage('No plottable data in that range')
       return
@@ -1898,24 +2366,78 @@ export function PureSheetsShell({
   // ---- Import / export (Phase S4) -------------------------------------------
 
   function uniqueSheetName(base: string): string {
-    const names = new Set(document.workbook.sheets.map(sheet => sheet.name))
-    if (!names.has(base)) return base
+    const names = new Set(
+      documentRef.current.workbook.sheets.map(sheet => sheet.name.toLowerCase()),
+    )
+    if (!names.has(base.toLowerCase())) return base
     let suffix = 2
-    while (names.has(`${base} ${suffix}`)) suffix += 1
+    while (names.has(`${base} ${suffix}`.toLowerCase())) suffix += 1
     return `${base} ${suffix}`
   }
 
   function handleImportExport(action: ImportExportAction): void {
+    if (action === 'print-pdf') {
+      printActiveSheet()
+      return
+    }
     const run =
       action === 'import-csv'
         ? importCsvFile
         : action === 'export-csv'
         ? exportCsvFile
+        : action === 'export-selection-csv'
+        ? () => exportSelectionFile('csv')
+        : action === 'export-selection-tsv'
+        ? () => exportSelectionFile('tsv')
+        : action === 'export-selection-json'
+        ? () => exportSelectionFile('json')
         : action === 'import-xlsx'
         ? importXlsxFile
         : exportXlsxFile
     void run().catch(error => {
       setStatusMessage(error instanceof Error ? error.message : String(error))
+    })
+  }
+
+  async function exportSelectionFile(
+    format: 'csv' | 'tsv' | 'json',
+  ): Promise<void> {
+    const range = activeRange()
+    if (!range) return
+    const version = transitions.version
+    const sheetId = activeSheet.id
+    const ext = format
+    const label = format.toUpperCase()
+    const path = await chooseSaveFilePath({
+      defaultName: `${activeSheet.name || 'Sheet'}-${range.replace(':', '-')}.${ext}`,
+      filters: [{ name: label, extensions: [ext] }],
+    })
+    if (!path) return
+    await captureEditorWorkbook()
+    if (version !== transitions.version)
+      throw Error('The workbook changed before export. Export it again.')
+    const sheet = documentRef.current.workbook.sheets.find(
+      candidate => candidate.id === sheetId,
+    )
+    if (!sheet) throw Error('The sheet was removed before export.')
+    const content =
+      format === 'json'
+        ? jsonFromSheet(sheet, range, documentRef.current.workbook)
+        : csvFromSheet(
+            sheet,
+            range,
+            documentRef.current.workbook,
+            format === 'tsv' ? '\t' : ',',
+          )
+    await writeTextFile(path, content)
+    setStatusMessage(
+      `Exported ${range} from ${sheet.name} as ${label} to ${fileNameFromPath(path)}`,
+    )
+    recordLedgerOperation({
+      lane: 'user',
+      kind: `sheets.export.${format}`,
+      summary: `Exported ${range} from ${sheet.name} as ${label}`,
+      refs: { path },
     })
   }
 
@@ -1969,12 +2491,12 @@ export function PureSheetsShell({
     if (!sheet) throw Error('The sheet was removed before export.')
     await writeTextFile(path, csvFromSheet(sheet, undefined, documentRef.current.workbook))
     setStatusMessage(
-      `Exported ${activeSheet.name} to ${fileNameFromPath(path)}`,
+      `Exported ${sheet.name} to ${fileNameFromPath(path)}`,
     )
     recordLedgerOperation({
       lane: 'user',
       kind: 'sheets.export.csv',
-      summary: `Exported sheet ${activeSheet.name} as CSV`,
+      summary: `Exported sheet ${sheet.name} as CSV`,
       refs: { path },
     })
   }
@@ -2166,8 +2688,7 @@ export function PureSheetsShell({
 
   // Commit any open in-cell edit and pull Univer's freshest data, so the cell
   // you're currently typing in counts in Find/Replace (#277). Returns the
-  // up-to-date active sheet; the edit's snapshot export is otherwise debounced,
-  // so the just-typed value wouldn't be in the model yet.
+  // up-to-date active sheet; never marks the workbook dirty when nothing changed.
   async function committedActiveSheet(): Promise<WorkbookSheet> {
     const editor = univerEditorRef.current
     if (!editor) return activeSheet
@@ -2177,9 +2698,15 @@ export function PureSheetsShell({
     const flushed = await editor.flushSnapshot?.().catch(() => null)
     if (!flushed) return activeSheet
     try {
-      const doc = documentFromEditorSnapshot(flushed, documentRef.current)
-      setDocument(doc)
-      setSaveState('dirty')
+      const current = documentRef.current
+      const doc = documentFromEditorSnapshot(flushed, current)
+      const contentChanged =
+        JSON.stringify(doc.workbook.sheets) !==
+        JSON.stringify(current.workbook.sheets)
+      if (contentChanged) {
+        setDocument(doc)
+        setSaveState('dirty')
+      }
       return (
         doc.workbook.sheets.find(sheet => sheet.id === activeSheet.id) ??
         activeSheet
@@ -2193,7 +2720,12 @@ export function PureSheetsShell({
     const query = findText.trim()
     if (!query) return
     const sheet = await committedActiveSheet()
-    const matches = findMatches(sheet, query, { matchCase })
+    const matches = findMatches(
+      sheet,
+      query,
+      { matchCase },
+      documentRef.current.workbook,
+    )
     if (!matches.length) {
       setStatusMessage(`No matches for ${findText}`)
       return
@@ -2216,13 +2748,42 @@ export function PureSheetsShell({
     setStatusMessage(`Found ${next} (${nextIndex + 1}/${matches.length})`)
   }
 
+  async function findPrevious(): Promise<void> {
+    const query = findText.trim()
+    if (!query) return
+    const sheet = await committedActiveSheet()
+    const matches = findMatches(
+      sheet,
+      query,
+      { matchCase },
+      documentRef.current.workbook,
+    )
+    if (!matches.length) {
+      setStatusMessage(`No matches for ${findText}`)
+      return
+    }
+    const currentIndex = matches.indexOf(selectedCell)
+    const prevIndex =
+      currentIndex <= 0 ? matches.length - 1 : currentIndex - 1
+    const prev = matches[prevIndex]
+    lastFindRef.current = prev
+    selectCell(prev)
+    void univerEditorRef.current?.revealCell?.(prev)
+    setStatusMessage(`Found ${prev} (${prevIndex + 1}/${matches.length})`)
+  }
+
   // Replace ONE occurrence at a time: the first match in the current cell, then
   // (once that cell has no matches left) the next matching cell (#277).
   async function replaceNext(): Promise<void> {
     const query = findText.trim()
     if (!query) return
     const sheet = await committedActiveSheet()
-    const matches = findMatches(sheet, query, { matchCase })
+    const matches = findMatches(
+      sheet,
+      query,
+      { matchCase },
+      documentRef.current.workbook,
+    )
     if (!matches.length) {
       setStatusMessage(`No matches for ${findText}`)
       return
@@ -2385,7 +2946,9 @@ export function PureSheetsShell({
       const pos = parseCellKey(key)
       if (pos && pos.row > lastDataRow) lastDataRow = pos.row
     }
-    const visible = new Set(visibleRowsForSheet(sheet))
+    const visible = new Set(
+      visibleRowsForSheet(sheet, documentRef.current.workbook),
+    )
     const hidden: number[] = []
     for (let row = 0; row <= lastDataRow; row += 1) {
       if (!visible.has(row)) hidden.push(row)
@@ -2515,7 +3078,15 @@ export function PureSheetsShell({
           setRedoStack([])
         }
         setSaveState('dirty')
-        return next
+        const refreshedSheets = next.workbook.sheets.map(s =>
+          s.charts?.length ? recomputeSheetCharts(s, next.workbook) : s,
+        )
+        const anyChartUpdated = refreshedSheets.some(
+          (s, idx) => s !== next.workbook.sheets[idx],
+        )
+        return anyChartUpdated
+          ? { ...next, workbook: { ...next.workbook, sheets: refreshedSheets } }
+          : next
       })
     },
     [],
@@ -2565,8 +3136,564 @@ export function PureSheetsShell({
   const normalizedRange = normalizeRangeToken(selectedRange)
   const showCompatibilityGrid = import.meta.env.MODE === 'test'
   const visibleSheets = document.workbook.sheets.filter(
-    sheet => !sheet.agentDraft,
+    sheet => !sheet.agentDraft && !sheet.hidden,
   )
+  const hiddenSheets = document.workbook.sheets.filter(
+    sheet => !sheet.agentDraft && Boolean(sheet.hidden),
+  )
+
+  // Format painter: when active, clicking/selecting a different cell or range applies the painted style once.
+  const prevPainterTargetRef = useRef(`${selectedCell}|${selectedRange}`)
+  useEffect(() => {
+    const signature = `${selectedCell}|${selectedRange}`
+    if (formatPainterStyle && signature !== prevPainterTargetRef.current) {
+      const target = normalizeRangeToken(selectedRange) ?? `${selectedCell}:${selectedCell}`
+      applyRangeStyle(target, formatPainterStyle, `Painted formatting to ${target}`)
+      setFormatPainterStyle(null)
+    }
+    prevPainterTargetRef.current = signature
+  }, [selectedCell, selectedRange, formatPainterStyle])
+
+  // --- Wave 1–5 Parity Action Handlers ---
+  function applyBorderPreset(preset: BorderPreset, color?: string): void {
+    const range = activeRange()
+    if (!range) return
+    if (preset === 'none') {
+      applyRangeStyle(
+        range,
+        { border: false, borderSides: undefined, borderStyle: undefined, borderColor: undefined },
+        'Cleared borders',
+      )
+      return
+    }
+    if (preset === 'all' || preset === 'outer') {
+      applyRangeStyle(
+        range,
+        { border: true, borderSides: undefined, borderStyle: 'thin', borderColor: color },
+        'Applied borders',
+      )
+      return
+    }
+    if (preset === 'double-bottom') {
+      applyRangeStyle(
+        range,
+        { border: false, borderSides: ['bottom'], borderStyle: 'double', borderColor: color },
+        'Applied double bottom border',
+      )
+      return
+    }
+    const sidesMap: Record<
+      Exclude<BorderPreset, 'all' | 'outer' | 'none' | 'double-bottom'>,
+      Array<'top' | 'right' | 'bottom' | 'left'>
+    > = {
+      bottom: ['bottom'],
+      top: ['top'],
+      'top-bottom': ['top', 'bottom'],
+      left: ['left'],
+      right: ['right'],
+    }
+    applyRangeStyle(
+      range,
+      { border: false, borderSides: sidesMap[preset], borderStyle: 'thin', borderColor: color },
+      `Applied ${preset} border`,
+    )
+  }
+
+  function toggleFormatPainter(): void {
+    if (formatPainterStyle) {
+      setFormatPainterStyle(null)
+      setStatusMessage('Cancelled format painter')
+      return
+    }
+    const style = activeSheet.cells[selectedCell]?.style
+    if (!style) {
+      setStatusMessage('Selected cell has no formatting to copy')
+      return
+    }
+    setFormatPainterStyle({ ...style })
+    setStatusMessage('Format painter active — select target cells')
+  }
+
+  function applyCustomFreeze(rows: number, columns: number): void {
+    updateActiveSheetFromCurrent(
+      sheet => setFreezePanes(sheet, rows, columns),
+      rows || columns
+        ? `Frozen ${rows} row(s) and ${columns} column(s)`
+        : 'Unfroze all panes',
+    )
+    const editor = univerEditorRef.current
+    if (editor) {
+      void editor.setFrozenRows(rows)
+      void editor.setFrozenColumns(columns)
+    }
+  }
+
+  function applyMultiSort(keys: SortKey[], hasHeader: boolean): void {
+    const range = activeRange()
+    if (!range) return
+    updateActiveSheetFromCurrent(
+      sheet => sortRangeMulti(sheet, range, keys, hasHeader, documentRef.current.workbook),
+      `Sorted ${range} (${keys.length} level${keys.length > 1 ? 's' : ''})`,
+    )
+    refreshUniverSurface()
+  }
+
+  function applySmartColumnFilter(
+    column: number,
+    rule: ColumnFilterRule | null,
+  ): void {
+    const next = setColumnFilter(activeSheet, column, rule)
+    updateActiveSheet(
+      next,
+      rule ? `Filtered column ${columnLabel(column)}` : `Cleared filter on column ${columnLabel(column)}`,
+    )
+    applyFilterToEditor(next)
+  }
+
+  function clearAllSmartFilters(): void {
+    const next = clearAllColumnFilters(activeSheet)
+    updateActiveSheet(next, 'Cleared all filters')
+    applyFilterToEditor(next)
+  }
+
+  function runRemoveDuplicates(hasHeader: boolean): void {
+    const range = activeRange()
+    if (!range) return
+    const result = removeDuplicatesInRange(
+      activeSheet,
+      range,
+      undefined,
+      hasHeader,
+      document.workbook,
+    )
+    if (result.removedCount === 0) {
+      setStatusMessage('No duplicate rows found')
+      showToast('No duplicate rows found')
+      return
+    }
+    updateActiveSheet(
+      result.sheet,
+      `Removed ${result.removedCount} duplicate row${result.removedCount === 1 ? '' : 's'}`,
+    )
+    refreshUniverSurface()
+    showToast(`Removed ${result.removedCount} duplicate row${result.removedCount === 1 ? '' : 's'}`)
+  }
+
+  function runSplitTextToColumns(delimiter: string): void {
+    const range = activeRange()
+    if (!range) return
+    const result = splitTextToColumns(activeSheet, range, delimiter)
+    if (result.rowsSplit === 0) {
+      setStatusMessage(`No cells contained "${delimiter}"`)
+      return
+    }
+    updateActiveSheet(
+      result.sheet,
+      `Split ${result.rowsSplit} row${result.rowsSplit === 1 ? '' : 's'} into up to ${result.maxParts} columns`,
+    )
+    refreshUniverSurface()
+  }
+
+  function runTrimWhitespace(): void {
+    const range = activeRange()
+    if (!range) return
+    const result = trimWhitespaceInRange(activeSheet, range)
+    if (result.trimmedCount === 0) {
+      setStatusMessage('No extra whitespace found')
+      return
+    }
+    updateActiveSheet(
+      result.sheet,
+      `Trimmed whitespace in ${result.trimmedCount} cell${result.trimmedCount === 1 ? '' : 's'}`,
+    )
+    refreshUniverSurface()
+  }
+
+  function runToggleCheckboxes(): void {
+    const range = activeRange()
+    if (!range) return
+    updateActiveSheetFromCurrent(
+      sheet => toggleCheckboxInRange(sheet, range),
+      `Toggled checkboxes in ${range}`,
+    )
+    refreshUniverSurface()
+  }
+
+  function runSetHyperlink(url: string, label?: string): void {
+    updateActiveSheetFromCurrent(
+      sheet => setCellHyperlink(sheet, selectedCell, url, label),
+      url.trim() ? `Linked ${selectedCell}` : `Removed link on ${selectedCell}`,
+    )
+    refreshUniverSurface()
+  }
+
+  function pasteTransposed(): void {
+    const copied = copiedBlockRef.current
+    if (!copied) {
+      setStatusMessage('Copy a range first before Paste Transpose')
+      return
+    }
+    const transposed = transposeCopiedBlock(copied)
+    updateActiveSheetFromCurrent(
+      sheet => pasteCellBlock(sheet, selectedCell, transposed, 'all'),
+      `Pasted transposed at ${selectedCell}`,
+    )
+    refreshUniverSurface()
+  }
+
+  function hideSelectedRows(): void {
+    const range = activeRange()
+    const bounds = range ? range.split(':').map(parseCellKey) : []
+    const startRow = bounds[0]?.row ?? selectedPosition?.row ?? 0
+    const endRow = bounds[1]?.row ?? startRow
+    const rows = Array.from(
+      { length: Math.abs(endRow - startRow) + 1 },
+      (_, i) => Math.min(startRow, endRow) + i,
+    )
+    const next = hideRowsInSheet(activeSheet, rows)
+    updateActiveSheet(next, `Hid ${rows.length} row${rows.length === 1 ? '' : 's'}`)
+    applyFilterToEditor(next)
+  }
+
+  function unhideAllRows(): void {
+    const next = unhideAllRowsInSheet(activeSheet)
+    updateActiveSheet(next, 'Unhid all rows')
+    applyFilterToEditor(next)
+  }
+
+  function hideSelectedColumns(): void {
+    const range = activeRange()
+    const bounds = range ? range.split(':').map(parseCellKey) : []
+    const startCol = bounds[0]?.column ?? selectedPosition?.column ?? 0
+    const endCol = bounds[1]?.column ?? startCol
+    const cols = Array.from(
+      { length: Math.abs(endCol - startCol) + 1 },
+      (_, i) => Math.min(startCol, endCol) + i,
+    )
+    updateActiveSheetFromCurrent(
+      sheet => hideColumnsInSheet(sheet, cols),
+      `Hid ${cols.length} column${cols.length === 1 ? '' : 's'}`,
+    )
+    void univerEditorRef.current?.hideColumns?.(
+      Math.min(startCol, endCol),
+      cols.length,
+    )
+  }
+
+  function unhideAllColumns(): void {
+    updateActiveSheetFromCurrent(unhideAllColumnsInSheet, 'Unhid all columns')
+    void univerEditorRef.current?.showColumns?.(0, activeSheet.columnCount)
+  }
+
+  function toggleGridlines(): void {
+    const nextVisible = activeSheet.showGridlines === false
+    updateActiveSheetFromCurrent(
+      toggleSheetGridlines,
+      nextVisible ? 'Gridlines shown' : 'Gridlines hidden',
+    )
+    void univerEditorRef.current?.setShowGridlines?.(nextVisible)
+  }
+
+  function changeZoom(ratio: number): void {
+    setZoom(ratio)
+    void univerEditorRef.current?.setZoom?.(ratio)
+    setStatusMessage(`Zoom ${Math.round(ratio * 100)}%`)
+  }
+
+  function printActiveSheet(): void {
+    const html = sheetsSnapshotHtml(document)
+    if (typeof window === 'undefined') return
+    const win = window.open('', '_blank', 'width=960,height=720')
+    if (win) {
+      win.document.write(
+        `<!doctype html><html><head><title>${document.metadata.title} — ${activeSheet.name}</title>` +
+          `<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:24px;color:#14171a;}table{border-collapse:collapse;width:100%;font-size:11px;}td,th{border:1px solid #c8ccd2;padding:4px 6px;}@media print{@page{size:landscape;margin:12mm;}}</style>` +
+          `</head><body><h2>${document.metadata.title} — ${activeSheet.name}</h2>${html || ''}<script>window.onload=()=>window.print()</script></body></html>`,
+      )
+      win.document.close()
+    } else {
+      window.print?.()
+    }
+    setStatusMessage('Opened print / PDF preview')
+  }
+
+  function saveNamedRange(name: string, range: string, comment?: string): void {
+    const norm = normalizeRangeToken(range)
+    if (!norm) {
+      setStatusMessage(`Invalid range ${range}`)
+      return
+    }
+    const next = upsertNamedRange(documentRef.current, {
+      name,
+      sheetId: activeSheet.id,
+      range: norm,
+      comment,
+    })
+    if (next === documentRef.current) {
+      setStatusMessage(`Invalid named range "${name}" (use letters, digits, _ — not a cell key like A1)`)
+      return
+    }
+    commitDocument(() => next, `Defined named range ${name} (${norm})`)
+  }
+
+  function removeNamedRangeById(id: string): void {
+    commitDocument(
+      current => deleteNamedRange(current, id),
+      'Deleted named range',
+    )
+  }
+
+  function jumpToCell(sheetId: string, rangeOrCell: string): void {
+    const norm = normalizeRangeToken(rangeOrCell) ?? rangeOrCell
+    const firstCell = norm.split(':')[0] || 'A1'
+    if (sheetId !== activeSheet.id) {
+      selectSheet(sheetId)
+    }
+    setSelectedCell(firstCell)
+    setSelectedRange(norm.includes(':') ? norm : `${firstCell}:${firstCell}`)
+    void univerEditorRef.current?.revealCell?.(firstCell)
+  }
+
+  function jumpToNamedRange(nr: NamedRange): void {
+    jumpToCell(nr.sheetId, nr.range)
+    setStatusMessage(`Jumped to ${nr.name} (${nr.range})`)
+  }
+
+  function addConditionalRuleFull(rule: Omit<ConditionalFormatRule, 'id'>): void {
+    updateActiveSheetFromCurrent(
+      sheet => addConditionalFormatRule(sheet, rule),
+      `Added conditional rule on ${rule.range}`,
+    )
+    refreshUniverSurface()
+  }
+
+  function deleteConditionalRuleById(ruleId: string): void {
+    updateActiveSheetFromCurrent(
+      sheet => removeConditionalFormatRule(sheet, ruleId),
+      'Removed conditional format rule',
+    )
+    refreshUniverSurface()
+  }
+
+  function moveConditionalRuleById(ruleId: string, delta: -1 | 1): void {
+    updateActiveSheetFromCurrent(
+      sheet => moveConditionalFormatRule(sheet, ruleId, delta),
+      'Reordered conditional format rules',
+    )
+    refreshUniverSurface()
+  }
+
+  function addValidationRuleFull(rule: Omit<ValidationRule, 'id'>): void {
+    updateActiveSheetFromCurrent(
+      sheet => addValidationRule(sheet, rule),
+      `Added ${rule.kind} validation on ${rule.range}`,
+    )
+  }
+
+  function deleteValidationRuleById(ruleId: string): void {
+    updateActiveSheetFromCurrent(
+      sheet => removeValidationRule(sheet, ruleId),
+      'Removed validation rule',
+    )
+  }
+
+  function createPivotFromSelection(): void {
+    if (activeSheet.pivot) {
+      setInspectorTab('pivot')
+      setInspectorOpen(true)
+      return
+    }
+    const range = activeRange()
+    if (!range) return
+    const fields = inferPivotFields(activeSheet, range, document.workbook)
+    if (!fields.length) {
+      setStatusMessage('Select a table range with headers to build a Pivot Table')
+      return
+    }
+    const firstCat = fields.find(f => !f.isNumeric) ?? fields[0]
+    const firstNum = fields.find(f => f.isNumeric) ?? fields[fields.length - 1]
+    const def: PivotDefinition = {
+      id: `pivot-${Date.now()}`,
+      sourceSheetId: activeSheet.id,
+      sourceRange: range,
+      rows: [{ columnIndex: firstCat.columnIndex, label: firstCat.label }],
+      columns: [],
+      values: [
+        {
+          columnIndex: firstNum.columnIndex,
+          label: firstNum.label,
+          aggregate: firstNum.isNumeric ? 'sum' : 'count',
+        },
+      ],
+      refreshedAt: new Date().toISOString(),
+    }
+    const pivotName = uniqueSheetName(`Pivot · ${activeSheet.name}`)
+    const pivotSheet = computePivotSheet(
+      activeSheet,
+      def,
+      { id: `sheet-pivot-${Date.now()}`, name: pivotName },
+      document.workbook,
+    )
+    commitDocument(
+      current => addSheetToWorkbook(current, pivotSheet),
+      `Created Pivot Table "${pivotName}"`,
+    )
+    refreshUniverSurface()
+    setInspectorTab('pivot')
+    setInspectorOpen(true)
+  }
+
+  function updatePivotDefinition(def: PivotDefinition): void {
+    const source = document.workbook.sheets.find(s => s.id === def.sourceSheetId)
+    if (!source) {
+      setStatusMessage('Pivot source sheet no longer exists')
+      return
+    }
+    const recomputed = computePivotSheet(
+      source,
+      def,
+      { id: activeSheet.id, name: activeSheet.name },
+      document.workbook,
+    )
+    updateActiveSheet(recomputed, 'Updated Pivot Table')
+    refreshUniverSurface()
+  }
+
+  function refreshActivePivot(): void {
+    if (!activeSheet.pivot) return
+    updatePivotDefinition(activeSheet.pivot)
+    showToast('Pivot Table refreshed')
+  }
+
+  function moveSheet(sheetId: string, delta: -1 | 1): void {
+    const idx = document.workbook.sheets.findIndex(s => s.id === sheetId)
+    if (idx < 0) return
+    commitDocument(
+      current => moveSheetInWorkbook(current, sheetId, idx + delta),
+      'Reordered sheets',
+    )
+    refreshUniverSurface()
+  }
+
+  function changeSheetTabColor(sheetId: string, color: string | undefined): void {
+    commitDocument(current => ({
+      ...current,
+      workbook: {
+        ...current.workbook,
+        sheets: current.workbook.sheets.map(s =>
+          s.id === sheetId ? setSheetTabColor(s, color) : s,
+        ),
+      },
+    }), color ? 'Updated tab color' : 'Cleared tab color')
+    void univerEditorRef.current?.setTabColor?.(sheetId, color ?? '')
+  }
+
+  function hideSheetById(sheetId: string): void {
+    commitDocument(
+      current => setSheetHidden(current, sheetId, true),
+      'Hid sheet',
+    )
+    refreshUniverSurface()
+  }
+
+  function unhideSheetById(sheetId: string): void {
+    commitDocument(
+      current => ({
+        ...setSheetHidden(current, sheetId, false),
+        workbook: {
+          ...setSheetHidden(current, sheetId, false).workbook,
+          activeSheetId: sheetId,
+        },
+      }),
+      'Shown hidden sheet',
+    )
+    refreshUniverSurface()
+  }
+
+  function revertAgentEntry(entry: AgentLogEntry): void {
+    if (!entry.cells?.length) return
+    commitDocument(current => {
+      const target = current.workbook.sheets.find(s => s.id === entry.sheetId)
+      if (!target) return current
+      let nextSheet = target
+      for (const change of entry.cells!) {
+        nextSheet = upsertCell(nextSheet, change.cell, change.before ?? '')
+      }
+      return cloneWithUpdatedSheet(current, nextSheet)
+    }, `Reverted "${entry.summary}"`)
+    refreshUniverSurface()
+    showToast(`Reverted ${entry.cells.length} cell change(s)`)
+  }
+
+  const activeFilterCount = activeFilterColumnIndices(activeSheet).length
+  const activePivotSource = activeSheet.pivot
+    ? document.workbook.sheets.find(s => s.id === activeSheet.pivot!.sourceSheetId)
+    : undefined
+  const activePivotStale = activeSheet.pivot
+    ? isPivotStale(activeSheet, activePivotSource, document.workbook)
+    : false
+  const selectionHasMerge = useMemo(
+    () =>
+      normalizedRange
+        ? hasMergeInRange(activeSheet, normalizedRange)
+        : false,
+    [activeSheet, normalizedRange],
+  )
+
+  const paletteCommands = useMemo<PaletteCommand[]>(() => {
+    const cmds: PaletteCommand[] = [
+      { id: 'bold', category: 'Format', label: 'Toggle Bold', shortcut: '⌘B', run: () => toggleStyle('bold') },
+      { id: 'italic', category: 'Format', label: 'Toggle Italic', shortcut: '⌘I', run: () => toggleStyle('italic') },
+      { id: 'underline', category: 'Format', label: 'Toggle Underline', shortcut: '⌘U', run: () => toggleStyle('underline') },
+      { id: 'strike', category: 'Format', label: 'Toggle Strikethrough', run: () => toggleStyle('strikethrough') },
+      { id: 'wrap', category: 'Format', label: 'Toggle Wrap Text', run: () => applyCellStyle({ wrap: selectedStyle?.wrap === 'wrap' ? 'overflow' : 'wrap' }) },
+      { id: 'merge', category: 'Format', label: selectionHasMerge ? 'Unmerge Cells' : 'Merge Selected Cells', run: toggleMergeSelectedRange },
+      { id: 'clear-fmt', category: 'Format', label: 'Clear Formatting', run: clearSelectedFormatting },
+      { id: 'painter', category: 'Format', label: 'Format Painter', run: toggleFormatPainter },
+      { id: 'cur-usd', category: 'Number', label: 'Format as Currency (USD $)', run: () => applyCellStyle({ numberFormat: 'currency', currencySymbol: '$' }) },
+      { id: 'cur-eur', category: 'Number', label: 'Format as Currency (EUR €)', run: () => applyCellStyle({ numberFormat: 'currency', currencySymbol: '€' }) },
+      { id: 'cur-gbp', category: 'Number', label: 'Format as Currency (GBP £)', run: () => applyCellStyle({ numberFormat: 'currency', currencySymbol: '£' }) },
+      { id: 'acct', category: 'Number', label: 'Format as Accounting', run: () => applyCellStyle({ numberFormat: 'accounting' }) },
+      { id: 'pct', category: 'Number', label: 'Format as Percent (%)', run: () => applyCellStyle({ numberFormat: 'percent' }) },
+      { id: 'sci', category: 'Number', label: 'Format as Scientific', run: () => applyCellStyle({ numberFormat: 'scientific' }) },
+      { id: 'border-dbl', category: 'Format', label: 'Double Bottom Border (Accounting Total)', run: () => applyBorderPreset('double-bottom') },
+      { id: 'pivot', category: 'Data', label: 'Insert Pivot Table Sheet', keywords: 'summarize group aggregate', run: createPivotFromSelection },
+      { id: 'dedupe', category: 'Data', label: 'Remove Duplicate Rows', run: () => runRemoveDuplicates(true) },
+      { id: 'split', category: 'Data', label: 'Split Text to Columns (Comma)', run: () => runSplitTextToColumns(',') },
+      { id: 'trim', category: 'Data', label: 'Trim Whitespace in Selection', run: runTrimWhitespace },
+      { id: 'checkbox', category: 'Data', label: 'Toggle Checkboxes in Selection', run: runToggleCheckboxes },
+      { id: 'transpose', category: 'Edit', label: 'Paste Transpose', run: pasteTransposed },
+      { id: 'paste-val', category: 'Edit', label: 'Paste Values Only', shortcut: '⌘⇧V', run: () => pasteSpecial('values') },
+      { id: 'fill-down', category: 'Edit', label: 'Fill Down', shortcut: '⌘D', run: () => fillSelectedRange('down') },
+      { id: 'fill-right', category: 'Edit', label: 'Fill Right', shortcut: '⌘R', run: () => fillSelectedRange('right') },
+      { id: 'autofit-col', category: 'Edit', label: 'Auto-Fit Selected Columns', run: autoFitSelectedColumns },
+      { id: 'autofit-row', category: 'Edit', label: 'Auto-Fit Selected Rows', run: autoFitSelectedRows },
+      { id: 'freeze-here', category: 'View', label: `Freeze Panes Up To ${selectedCell}`, run: () => applyCustomFreeze((selectedPosition?.row ?? 0) + 1, (selectedPosition?.column ?? 0) + 1) },
+      { id: 'unfreeze', category: 'View', label: 'Unfreeze All Panes', run: () => applyCustomFreeze(0, 0) },
+      { id: 'gridlines', category: 'View', label: activeSheet.showGridlines === false ? 'Show Gridlines' : 'Hide Gridlines', run: toggleGridlines },
+      { id: 'show-formulas', category: 'View', label: showFormulas ? 'Show Values' : 'Show Formulas', shortcut: 'Ctrl+`', run: () => setShowFormulas(v => !v) },
+      { id: 'find', category: 'Edit', label: 'Find and Replace', shortcut: '⌘F', run: () => setFindOpen(true) },
+      { id: 'print', category: 'File', label: 'Print / Export PDF', run: printActiveSheet },
+      { id: 'insp-rules', category: 'Inspector', label: 'Open Conditional Formatting Rules Manager', run: () => { setInspectorTab('rules'); setInspectorOpen(true) } },
+      { id: 'insp-valid', category: 'Inspector', label: 'Open Data Validation Manager', run: () => { setInspectorTab('validate'); setInspectorOpen(true) } },
+      { id: 'insp-names', category: 'Inspector', label: 'Open Named Ranges Manager', run: () => { setInspectorTab('names'); setInspectorOpen(true) } },
+      { id: 'insp-audit', category: 'Inspector', label: 'Open Formula Audit (Precedents & Dependents)', run: () => { setInspectorTab('audit'); setInspectorOpen(true) } },
+      { id: 'insp-log', category: 'Inspector', label: 'Open Agent Activity & Revert Log', run: () => { setInspectorTab('activity'); setInspectorOpen(true) } },
+      ...visibleSheets.map(s => ({
+        id: `sheet-${s.id}`,
+        category: 'Sheet',
+        label: `Go to sheet: ${s.name}`,
+        run: () => selectSheet(s.id),
+      })),
+      ...(document.workbook.namedRanges ?? []).map(nr => ({
+        id: `nr-${nr.id}`,
+        category: 'Name',
+        label: `Jump to ${nr.name} (${nr.range})`,
+        run: () => jumpToNamedRange(nr),
+      })),
+    ]
+    return cmds
+  }, [activeSheet, selectedCell, normalizedRange, selectedStyle, showFormulas, visibleSheets, document.workbook.namedRanges])
   // Data-validation feedback (Phase S3), computed from the LIVE workbook for
   // every sheet: the Univer surface paints these cells and the fallback grid
   // titles them. Flag, never reject — commits still land.
@@ -2591,10 +3718,10 @@ export function PureSheetsShell({
   // Status-bar summaries (Phase S4): count/sum/average/min/max of the
   // numeric cells in the selected range. Skipped for single cells and for
   // very large selections (evaluating every formula would stall the UI).
-  const rangeSummary = useMemo(() => {
-    if (!normalizedRange) return null
+  const { rangeSummary, statPills } = useMemo(() => {
+    if (!normalizedRange) return { rangeSummary: null, statPills: [] as StatPill[] }
     const keys = cellsInRange(normalizedRange, 20000)
-    if (keys.length < 2) return null
+    if (keys.length < 2) return { rangeSummary: null, statPills: [] as StatPill[] }
     const numbers: number[] = []
     for (const key of keys) {
       const value = computedCellValue(activeSheet, key, document.workbook)
@@ -2602,16 +3729,31 @@ export function PureSheetsShell({
       const numeric = Number(value)
       if (Number.isFinite(numeric)) numbers.push(numeric)
     }
-    if (!numbers.length) return null
+    if (!numbers.length) return { rangeSummary: null, statPills: [] as StatPill[] }
     const sum = numbers.reduce((total, value) => total + value, 0)
+    const avg = sum / numbers.length
+    const min = Math.min(...numbers)
+    const max = Math.max(...numbers)
     const compact = (value: number): string =>
       Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)))
-    return `Sum ${compact(sum)} · Avg ${compact(
-      sum / numbers.length,
-    )} · Min ${compact(Math.min(...numbers))} · Max ${compact(
-      Math.max(...numbers),
-    )} · Count ${numbers.length}`
-  }, [activeSheet, normalizedRange])
+    return {
+      rangeSummary: `Sum ${compact(sum)} · Avg ${compact(avg)} · Min ${compact(min)} · Max ${compact(max)} · Count ${numbers.length}`,
+      statPills: [
+        { label: 'Sum', display: compact(sum), raw: String(sum) },
+        { label: 'Avg', display: compact(avg), raw: String(avg) },
+        { label: 'Count', display: String(numbers.length), raw: String(numbers.length) },
+      ],
+    }
+  }, [activeSheet, normalizedRange, document.workbook])
+
+  const findMatchesList = useMemo(
+    () =>
+      findText.trim()
+        ? findMatches(activeSheet, findText, { matchCase }, document.workbook)
+        : [],
+    [activeSheet, document.workbook, findText, matchCase],
+  )
+  const findActiveIndex = findMatchesList.indexOf(selectedCell)
 
   const statusText = `Range ${normalizedRange ?? selectedCell}. ${
     rangeSummary ? `${rangeSummary}. ` : ''
@@ -2692,30 +3834,70 @@ export function PureSheetsShell({
               aria-label="Workbook title"
               value={titleDraft ?? document.metadata.title}
               placeholder="Untitled"
-              onFocus={() => setTitleDraft(document.metadata.title)}
+              onFocus={() => {
+                skipTitleBlurCommitRef.current = false
+                setTitleDraft(document.metadata.title)
+              }}
               onChange={event => setTitleDraft(event.currentTarget.value)}
-              onBlur={event => commitWorkbookTitle(event.currentTarget.value)}
+              onBlur={event => {
+                if (skipTitleBlurCommitRef.current) {
+                  skipTitleBlurCommitRef.current = false
+                  setTitleDraft(null)
+                  return
+                }
+                commitWorkbookTitle(event.currentTarget.value)
+              }}
               onKeyDown={event => {
-                if (event.key === 'Enter') event.currentTarget.blur()
+                if (event.key === 'Enter') {
+                  event.currentTarget.blur()
+                } else if (event.key === 'Escape') {
+                  event.preventDefault()
+                  skipTitleBlurCommitRef.current = true
+                  setTitleDraft(null)
+                  event.currentTarget.blur()
+                }
               }}
             />
           </TitleBlock>
           <CommandBar
             analysisActions={<ToolbarMenu label="Analyze" displayValue="Analyze" options={[...analysisOptions]} minWidth={165}
               onSelect={value => void openAnalysis(value as AnalysisMode).catch(reportFailure)} />}
+            activeSheet={activeSheet}
+            workbook={document.workbook}
+            selectedCell={selectedCell}
+            selectedRow={selectedPosition?.row ?? 0}
+            selectedColumn={selectedPosition?.column ?? 0}
             selectedStyle={selectedStyle}
+            isMerged={selectionHasMerge}
+            formatPainterActive={Boolean(formatPainterStyle)}
+            showGridlines={activeSheet.showGridlines !== false}
+            showFormulas={showFormulas}
+            inspectorOpen={inspectorOpen}
+            activeFilterCount={activeFilterCount}
             canUndo={undoStack.length > 0}
             canRedo={redoStack.length > 0}
+            findOpen={findOpen}
+            onFindOpenChange={setFindOpen}
+            findFocusRequest={findFocusRequest}
             findText={findText}
             replaceText={replaceText}
+            findMatchCount={findMatchesList.length}
+            findActiveIndex={findActiveIndex}
             onUndo={undo}
             onRedo={redo}
             onCopySelectedRange={copySelectedRange}
             onPasteFromClipboard={() => pasteFromClipboard()}
             onToggleStyle={toggleStyle}
             onApplyCellStyle={applyCellStyle}
+            onApplyBorderPreset={applyBorderPreset}
             onClearSelectedRange={clearSelectedRange}
+            onClearFormatting={clearSelectedFormatting}
+            onToggleFormatPainter={toggleFormatPainter}
+            onToggleMerge={toggleMergeSelectedRange}
             onSortSelectedRange={sortSelectedRange}
+            sortHasHeader={sortHasHeader}
+            onToggleSortHeader={() => setSortHasHeader(current => !current)}
+            onMultiSort={applyMultiSort}
             onToggleFilter={() => {
               const next = toggleFilterRow(
                 activeSheet,
@@ -2731,15 +3913,28 @@ export function PureSheetsShell({
                 )
               }
             }}
+            onApplyColumnFilter={applySmartColumnFilter}
+            onClearAllFilters={clearAllSmartFilters}
             onToggleFirstRowFreeze={toggleFirstRowFreeze}
             onToggleFirstColumnFreeze={toggleFirstColumnFreeze}
+            onSetFreezePanes={applyCustomFreeze}
             firstRowFrozen={(activeSheet.frozenRows ?? 0) > 0}
             firstColumnFrozen={(activeSheet.frozenColumns ?? 0) > 0}
             onCreateChart={createChart}
+            onCreatePivot={createPivotFromSelection}
             onInsertRow={insertSelectedRow}
             onDeleteRow={deleteSelectedRow}
             onInsertColumn={insertSelectedColumn}
             onDeleteColumn={deleteSelectedColumn}
+            onAutoFitColumns={autoFitSelectedColumns}
+            onAutoFitRows={autoFitSelectedRows}
+            onHideRows={hideSelectedRows}
+            onUnhideRows={unhideAllRows}
+            onHideColumns={hideSelectedColumns}
+            onUnhideColumns={unhideAllColumns}
+            onToggleGridlines={toggleGridlines}
+            onToggleShowFormulas={() => setShowFormulas(v => !v)}
+            onPrintSheet={printActiveSheet}
             onResizeColumn={delta =>
               resizeSelectedColumn(selectedColumnWidth() + delta)
             }
@@ -2748,14 +3943,21 @@ export function PureSheetsShell({
             }
             onPasteValuesOnly={() => pasteSpecial('values')}
             onPasteFormattingOnly={() => pasteSpecial('formats')}
+            onPasteTranspose={pasteTransposed}
             onFillDown={() => fillSelectedRange('down')}
             onFillRight={() => fillSelectedRange('right')}
             onAdjustDecimals={adjustDecimals}
             onApplyTableStyle={applyTableStyle}
             onInsertFormulaTemplate={insertFormulaTemplate}
+            onRemoveDuplicates={runRemoveDuplicates}
+            onSplitTextToColumns={runSplitTextToColumns}
+            onTrimWhitespace={runTrimWhitespace}
+            onToggleCheckboxes={runToggleCheckboxes}
+            onSetHyperlink={runSetHyperlink}
             onFindTextChange={setFindText}
             onReplaceTextChange={setReplaceText}
             onFindNext={findNext}
+            onFindPrevious={findPrevious}
             onReplaceMatches={replaceMatches}
             matchCase={matchCase}
             onToggleMatchCase={() => setMatchCase(current => !current)}
@@ -2782,6 +3984,8 @@ export function PureSheetsShell({
             onClearConditionalFormats={clearConditionalFormats}
             onImportExport={handleImportExport}
             onToggleAgentActivity={() => setAgentActivityOpen(open => !open)}
+            onToggleInspector={() => setInspectorOpen(open => !open)}
+            onOpenCommandPalette={() => setPaletteOpen(true)}
             agentLogCount={(document.workbook.agentLog ?? []).length}
           />
         </TopBar>
@@ -2798,6 +4002,30 @@ export function PureSheetsShell({
             setAnalysis(null)
           }}
         />}
+
+        {activeSheet.pivot && (
+          <PivotBanner aria-label="Pivot table status">
+            <span>
+              <strong>Pivot Table</strong> from{' '}
+              {activePivotSource?.name ?? 'deleted sheet'}!{activeSheet.pivot.sourceRange}
+              {activePivotStale ? ' · Source changed — refresh to update' : ''}
+            </span>
+            <PivotBannerActions>
+              <ImportWarningsDismiss type="button" onClick={refreshActivePivot}>
+                Refresh
+              </ImportWarningsDismiss>
+              <ImportWarningsDismiss
+                type="button"
+                onClick={() => {
+                  setInspectorTab('pivot')
+                  setInspectorOpen(true)
+                }}
+              >
+                Configure
+              </ImportWarningsDismiss>
+            </PivotBannerActions>
+          </PivotBanner>
+        )}
 
         {importWarnings && importWarnings.length > 0 && (
           <ImportWarningsBanner aria-label="Import warnings">
@@ -2823,13 +4051,54 @@ export function PureSheetsShell({
             editValue={editValue}
             selectedDisplay={selectedDisplay}
             selectedFormulaError={selectedFormulaError}
+            selectedHyperlink={activeSheet.cells[selectedCell]?.hyperlink}
+            selectedCheckbox={activeSheet.cells[selectedCell]?.checkbox}
+            onToggleCheckboxValue={() => {
+              const nextVal =
+                activeSheet.cells[selectedCell]?.value.trim().toUpperCase() === 'TRUE'
+                  ? 'FALSE'
+                  : 'TRUE'
+              commitSelectedCell(nextVal)
+            }}
+            namedRanges={document.workbook.namedRanges ?? []}
+            onSelectNamedRange={jumpToNamedRange}
             onRangeChange={range =>
               changeSelectedRange(range, { manual: true })
             }
             onRangeInvalid={setStatusMessage}
             onEditValueChange={changeFormulaValue}
             onCommitSelectedCell={commitSelectedCell}
+            onCancelEdit={cancelFormulaEdit}
           />
+
+          {showFormulas && (
+            <FormulasStrip aria-label="Sheet formulas overview">
+              <strong>Formulas mode</strong>
+              {Object.entries(activeSheet.cells)
+                .filter(([, cell]) => cell.kind === 'formula')
+                .slice(0, 24)
+                .map(([key, cell]) => (
+                  <FormulaChip
+                    key={key}
+                    type="button"
+                    onClick={() => jumpToCell(activeSheet.id, key)}
+                    title={`Jump to ${key}`}
+                  >
+                    <span>{key}:</span> {cell.value}
+                  </FormulaChip>
+                ))}
+              {Object.values(activeSheet.cells).filter(c => c.kind === 'formula')
+                .length === 0 && (
+                <span>No formulas on {activeSheet.name}.</span>
+              )}
+              <ImportWarningsDismiss
+                type="button"
+                onClick={() => setShowFormulas(false)}
+              >
+                Done
+              </ImportWarningsDismiss>
+            </FormulasStrip>
+          )}
 
           {agentActivityOpen && (
             <AgentActivityBar
@@ -2890,6 +4159,7 @@ export function PureSheetsShell({
                     visibleRows={visibleRows}
                     selectedCell={selectedCell}
                     normalizedRange={normalizedRange}
+                    showFormulas={showFormulas}
                     invalidCells={activeSheetInvalidCells}
                     onPasteIntoCell={pasteIntoCell}
                     onPasteFromClipboard={pasteFromClipboard}
@@ -2908,15 +4178,56 @@ export function PureSheetsShell({
                 onUpdateChart={updateChartConfig}
               />
             </SheetColumn>
+
+            {inspectorOpen && !compact && (
+              <InspectorRail
+                tab={inspectorTab}
+                onSelectTab={setInspectorTab}
+                onClose={() => setInspectorOpen(false)}
+                document={document}
+                activeSheet={activeSheet}
+                selectedCell={selectedCell}
+                selectedRange={normalizedRange ?? `${selectedCell}:${selectedCell}`}
+                invalidFlags={invalidFlagsBySheet[activeSheet.id] ?? []}
+                showFormulas={showFormulas}
+                onToggleShowFormulas={() => setShowFormulas(v => !v)}
+                onJumpToCell={jumpToCell}
+                onAddConditionalRule={addConditionalRuleFull}
+                onDeleteConditionalRule={deleteConditionalRuleById}
+                onMoveConditionalRule={moveConditionalRuleById}
+                onAddValidationRule={addValidationRuleFull}
+                onDeleteValidationRule={deleteValidationRuleById}
+                onSaveNamedRange={saveNamedRange}
+                onDeleteNamedRange={removeNamedRangeById}
+                onJumpToNamedRange={jumpToNamedRange}
+                onCreatePivotFromSelection={createPivotFromSelection}
+                onUpdatePivotDefinition={updatePivotDefinition}
+                onRefreshPivot={refreshActivePivot}
+                onRevertAgentEntry={revertAgentEntry}
+              />
+            )}
           </MainArea>
 
           <SheetTabsBar
             compact={compact}
             sheets={visibleSheets}
+            hiddenSheets={hiddenSheets}
             activeSheetId={activeSheet.id}
             renamingSheetId={renamingSheetId}
             renameDraft={renameDraft}
             statusText={statusText}
+            statPills={statPills}
+            invalidCount={(invalidFlagsBySheet[activeSheet.id] ?? []).length}
+            zoom={zoom}
+            onCopyStat={pill => {
+              void writeClipboard(pill.raw).catch(() => undefined)
+              showToast(`Copied ${pill.label}: ${pill.raw}`)
+            }}
+            onOpenInvalidAudit={() => {
+              setInspectorTab('audit')
+              setInspectorOpen(true)
+            }}
+            onZoomChange={changeZoom}
             onAddSheet={addSheet}
             onSelectSheet={selectSheet}
             onRenameSheet={renameCurrentSheet}
@@ -2926,8 +4237,18 @@ export function PureSheetsShell({
             onRenameDraftChange={setRenameDraft}
             onCommitSheetRename={commitSheetRename}
             onCancelSheetRename={cancelSheetRename}
+            onMoveSheet={moveSheet}
+            onSetSheetTabColor={changeSheetTabColor}
+            onHideSheet={hideSheetById}
+            onUnhideSheet={unhideSheetById}
           />
         </SheetSurface>
+
+        <CommandPalette
+          open={paletteOpen}
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+        />
       </Shell>
     </AppFrame>
   )
@@ -2953,7 +4274,7 @@ function fileNameFromPath(path: string): string {
 // header is its only direct <header> child; the command bar's is nested.
 const COMPACT_ROOM_CSS = `
   [data-compact-room] > header,
-  [data-compact-hidden] {
+  [data-compact-room] [data-compact-hidden] {
     display: none !important;
   }
 `
@@ -3101,6 +4422,56 @@ const ImportWarningsList = styled.ul`
 
   > li {
     margin: 1px 0;
+  }
+`
+
+const PivotBanner = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px var(--pure-chrome-inset);
+  border-bottom: 1px solid var(--pure-chrome-line);
+  background: var(--n-panel, var(--pure-chrome-well));
+  color: var(--sheets-ink);
+  font-size: 12px;
+`
+
+const PivotBannerActions = styled.div`
+  display: inline-flex;
+  gap: 6px;
+`
+
+const FormulasStrip = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--pure-chrome-inset);
+  border-bottom: 1px solid var(--pure-chrome-line);
+  background: var(--n-panel, var(--pure-chrome-well));
+  color: var(--sheets-ink);
+  font-size: 11.5px;
+`
+
+const FormulaChip = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--pure-chrome-line);
+  border-radius: 2px;
+  background: var(--pure-chrome-surface);
+  color: var(--sheets-ink);
+  font-family: var(--sheets-mono);
+  font-size: 11px;
+  cursor: pointer;
+  span {
+    font-weight: 700;
+    color: var(--sheets-accent);
+  }
+  &:hover {
+    background: var(--pure-chrome-hover);
   }
 `
 
