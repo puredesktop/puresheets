@@ -1,3 +1,4 @@
+import { normalizeNamedRanges } from './rangeNames'
 import { workbookLinkedTables } from './linkedTables'
 import type {
   AgentLogCellChange,
@@ -28,7 +29,6 @@ import {
   normalizeFilterQuery,
   normalizeHexColor,
   normalizeIndexList,
-  normalizeNamedRanges,
   normalizePivotDefinition,
   normalizeProtection,
   normalizeValidations,
@@ -133,8 +133,8 @@ export function validateDocument(input: unknown): PureSheetsDocument {
     workbook: {
       activeSheetId,
       sheets,
-      namedRanges: normalizeNamedRanges(workbook.namedRanges),
       agentLog: normalizeAgentLog(workbook.agentLog),
+      namedRanges: normalizeNamedRanges(workbook.namedRanges, sheets),
     },
   }
   if (isRecord(engine.snapshot) && isRecord(engine.snapshot.sheets)) {

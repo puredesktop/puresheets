@@ -177,6 +177,8 @@ import { CommentBar } from './CommentBar'
 import type { ValidationKind } from './DataRuleControls'
 import { CompatibilityGrid } from './CompatibilityGrid'
 import { ChartPanel, type ChartUpdatePatch } from './ChartPanel'
+import { analysisOptions, WorkbookAnalysisDialog, type AnalysisMode } from './WorkbookAnalysisDialog'
+import { ToolbarMenu } from './ToolbarMenu'
 import { FormulaBar } from './FormulaBar'
 import { SheetTabsBar, type StatPill } from './SheetTabsBar'
 import { UniverSpreadsheetSurface } from './UniverSpreadsheetSurface'
@@ -246,6 +248,9 @@ export function PureSheetsShell({
     },
     [],
   )
+  const [analysis, setAnalysis] = useState<{
+    mode: AnalysisMode; source: PureSheetsDocument; sheet: WorkbookSheet; range: string; cell: string; version: number
+  } | null>(null)
   const [filePath, setFilePath] = useState('')
   const [selectedCell, setSelectedCell] = useState('A1')
   const [editValue, setEditValue] = useState('')
@@ -2607,6 +2612,33 @@ export function PureSheetsShell({
     }
   }
 
+  async function openAnalysis(mode: AnalysisMode): Promise<void> {
+    const version = transitions.version
+    await captureEditorWorkbook()
+    if (version !== transitions.version) throw new Error('The workbook changed. Open Analyze again.')
+    const source = documentRef.current
+    const sheet = source.workbook.sheets.find(sheet => sheet.id === source.workbook.activeSheetId)
+    if (!sheet) return
+    setAnalysis({ mode, source, sheet, range: normalizeRangeToken(selectedRange) ?? `${selectedCell}:${selectedCell}`, cell: selectedCell, version })
+  }
+
+  function navigateAnalysis(sheetId: string, range: string): void {
+    setAnalysis(null)
+    const cell = range.split(':')[0]
+    const editor = univerEditorRef.current
+    if (!editor) {
+      selectSheet(sheetId)
+      selectCell(cell)
+      changeSelectedRange(normalizeRangeToken(range) ?? range, { manual: true })
+      return
+    }
+    void (async () => {
+      if (sheetId !== activeSheet.id) await editor.selectSheet(sheetId)
+      await editor.revealCell(cell)
+      await editor.selectRange(normalizeRangeToken(range) ?? range)
+    })().catch(reportFailure)
+  }
+
   function resizeSelectedColumn(width: number): void {
     if (!selectedPosition) return
     const column = selectedPosition.column
@@ -3831,6 +3863,8 @@ export function PureSheetsShell({
             />
           </TitleBlock>
           <CommandBar
+            analysisActions={<ToolbarMenu label="Analyze" displayValue="Analyze" options={[...analysisOptions]} minWidth={165}
+              onSelect={value => void openAnalysis(value as AnalysisMode).catch(reportFailure)} />}
             activeSheet={activeSheet}
             workbook={document.workbook}
             selectedCell={selectedCell}
@@ -3958,6 +3992,19 @@ export function PureSheetsShell({
             agentLogCount={(document.workbook.agentLog ?? []).length}
           />
         </TopBar>
+
+        {analysis && !compact && <WorkbookAnalysisDialog
+          mode={analysis.mode} document={analysis.source} sheet={analysis.sheet} range={analysis.range} cell={analysis.cell}
+          onClose={() => setAnalysis(null)} onNavigate={navigateAnalysis}
+          onApply={(next, message) => {
+            if (analysis.version !== transitions.version || analysis.source !== documentRef.current)
+              throw new Error('The workbook changed while this preview was open. Close it and preview again.')
+            commitDocument(() => next, message)
+            if (analysis.sheet.id !== next.workbook.activeSheetId) selectCell('A1')
+            refreshUniverSurface()
+            setAnalysis(null)
+          }}
+        />}
 
         {activeSheet.pivot && (
           <PivotBanner aria-label="Pivot table status">
@@ -4218,9 +4265,11 @@ export function PureSheetsShell({
               <button
                 type="button"
                 onClick={() => {
-                  void publishSheetLiveData(document, activeSheet, bridge).then(ds =>
-                    showToast(`Published live dataset "${ds.name}" (${ds.metrics.length} KPIs, ${ds.table.rows.length} rows).`),
-                  )
+                  void publishSheetLiveData(document, activeSheet, bridge)
+                    .then(ds =>
+                      showToast(`Published live dataset "${ds.name}" (${ds.metrics.length} KPIs, ${ds.table.rows.length} rows).`),
+                    )
+                    .catch(reportFailure)
                 }}
                 style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px', fontWeight: 600 }}
               >
@@ -4229,9 +4278,11 @@ export function PureSheetsShell({
               <button
                 type="button"
                 onClick={() => {
-                  void sendSheetToApp(document, activeSheet, 'pureslides', bridge).then(() =>
-                    showToast(`Sent "${activeSheet.name}" live metrics & table to PureSlides.`),
-                  )
+                  void sendSheetToApp(document, activeSheet, 'pureslides', bridge)
+                    .then(() =>
+                      showToast(`Sent "${activeSheet.name}" live metrics & table to PureSlides.`),
+                    )
+                    .catch(reportFailure)
                 }}
                 style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px' }}
               >
@@ -4240,9 +4291,11 @@ export function PureSheetsShell({
               <button
                 type="button"
                 onClick={() => {
-                  void sendSheetToApp(document, activeSheet, 'canvas2', bridge).then(() =>
-                    showToast(`Sent "${activeSheet.name}" live metrics & table to PureCanvas.`),
-                  )
+                  void sendSheetToApp(document, activeSheet, 'canvas2', bridge)
+                    .then(() =>
+                      showToast(`Sent "${activeSheet.name}" live metrics & table to PureCanvas.`),
+                    )
+                    .catch(reportFailure)
                 }}
                 style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px' }}
               >
@@ -4251,9 +4304,11 @@ export function PureSheetsShell({
               <button
                 type="button"
                 onClick={() => {
-                  void sendSheetToApp(document, activeSheet, 'puresite', bridge).then(() =>
-                    showToast(`Sent "${activeSheet.name}" live metrics & table to PureSite.`),
-                  )
+                  void sendSheetToApp(document, activeSheet, 'puresite', bridge)
+                    .then(() =>
+                      showToast(`Sent "${activeSheet.name}" live metrics & table to PureSite.`),
+                    )
+                    .catch(reportFailure)
                 }}
                 style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px' }}
               >

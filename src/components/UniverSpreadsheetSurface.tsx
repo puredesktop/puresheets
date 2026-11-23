@@ -1,3 +1,4 @@
+import { DEFINED_NAMES_RESOURCE } from '../lib/univerAdapter'
 import { useEffect, useRef } from 'react'
 import type React from 'react'
 import styled from 'styled-components'
@@ -129,6 +130,9 @@ export function UniverSpreadsheetSurface({
 }): React.ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const lastSnapshotRef = useRef(snapshot)
+  // Univer retains parsed names across same-unit reloads. Recreate the
+  // instance if the name definitions changed so old #NAME? results are reset.
+  const nameDefinitions = snapshot?.resources?.find(resource => resource.name === DEFINED_NAMES_RESOURCE)?.data ?? '{}'
   const invalidCellsRef = useRef<Record<string, InvalidCellFlag[]>>({})
   invalidCellsRef.current = invalidCells ?? {}
   // Repaints the validation flags on the live canvas. Populated at mount.
@@ -307,6 +311,7 @@ export function UniverSpreadsheetSurface({
           }) => void,
         ) => { dispose: () => void }
         getFormula?: () => {
+          executeCalculation?: () => void
           calculationResultApplied?: (callback: () => void) => {
             dispose: () => void
           }
@@ -318,6 +323,12 @@ export function UniverSpreadsheetSurface({
         getActiveWorkbook?: () => UniverFacadeWorkbook | null
         disposeUnit?: (unitId: string) => boolean
       }
+
+      function calculateNames(snapshot: PureSheetsUniverSnapshot | null): void {
+        if (snapshot?.resources?.some(resource => resource.name === DEFINED_NAMES_RESOURCE && resource.data !== '{}'))
+          univerApi.getFormula?.().executeCalculation?.()
+      }
+      calculateNames(lastSnapshotRef.current)
 
       // Best-effort canvas enforcement of protected ranges (Phase S5):
       // mirror the model-layer locks into Univer's permission service where
@@ -1437,6 +1448,7 @@ export function UniverSpreadsheetSurface({
           UniverInstanceType.UNIVER_SHEET,
           cloneSnapshot(nextSnapshot),
         )
+        calculateNames(nextSnapshot)
         const targetSheetId = requestedSheetId(nextSnapshot) ?? previousSheetId
         const sameSheet = targetSheetId === previousSheetId
         restoreViewState(targetSheetId, sameSheet ? previousRange : null, sameSheet ? previousScroll : null)
@@ -1482,7 +1494,7 @@ export function UniverSpreadsheetSurface({
       onEditorReady(null)
       disposeUniver?.()
     }
-  }, [snapshot?.id, onEditorReady, onSelectionChange, onSnapshotChange])
+  }, [snapshot?.id, nameDefinitions, onEditorReady, onSelectionChange, onSnapshotChange])
 
   // A `revision` bump asks the canvas to re-sync with the model (undo/redo,
   // paste, fill, sort, protect, …). Reload the workbook unit in place instead

@@ -170,6 +170,7 @@ export function duplicateSheet(
     // A duplicate is an ordinary sheet — it must not claim to be an agent
     // draft of the original's source (QA operations only track the original).
     agentDraft: undefined,
+    pivot: undefined,
     cells: Object.fromEntries(
       Object.entries(source.cells).map(([key, cell]) => [
         key,
@@ -327,6 +328,14 @@ export function normalizeRangeToken(rangeToken: string): string | null {
         range.end.column,
       )}`
     : null
+}
+
+export function rangesIntersect(first: string, second: string): boolean {
+  const bounds = (range: string) => parseRange(normalizeRangeToken(range) ?? '')
+  const a = bounds(first)
+  const b = bounds(second)
+  return !!a && !!b && a.start.row <= b.end.row && b.start.row <= a.end.row &&
+    a.start.column <= b.end.column && b.start.column <= a.end.column
 }
 
 export function cellsInRange(rangeToken: string, maxCells = Infinity): string[] {
