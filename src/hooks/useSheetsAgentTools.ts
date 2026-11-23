@@ -1,28 +1,13 @@
 import { useRef } from 'react'
-import { formatAgentToolJson } from '@purescience/platform-ui/bridge/agentToolHelpers'
-import type { AgentToolHandler } from '@purescience/platform-ui/bridge/react/usePlatformAgentTools'
+import type { AgentToolInvokeContext } from '@purescience/platform-ui/bridge/react/usePlatformAgentTools'
 import { usePlatformAgentTools } from '@purescience/platform-ui/bridge/react/usePlatformAgentTools'
 import {
   AgentSheetsToolError,
+  EXPOSED_TOOL_NAMES,
   PURESHEETS_AGENT_LOG_LABEL,
-  PURESHEETS_AGENT_TOOL_NAMES,
   type SheetsAgentToolContext,
 } from '../agents/catalog'
-import {
-  autoFitRowsHandler,
-  addSheetHandler,
-  deleteSheetHandler,
-  formatRangeHandler,
-  renameSheetHandler,
-  applyCellChangesHandler,
-  findInWorkbookHandler,
-  getSheetsContextHandler,
-  listSheetChangesHandler,
-  addChartHandler,
-  readRangeHandler,
-  getExchangeRateHandler,
-  setCellCommentHandler,
-} from '../agents/handlers'
+import { buildPureSheetsHandlers } from '../agents/operationsRegistry'
 
 export function useSheetsAgentTools(
   ready: boolean,
@@ -34,91 +19,32 @@ export function useSheetsAgentTools(
   const mayChangeRef = useRef(mayChangeWorkbook)
   mayChangeRef.current = mayChangeWorkbook
 
-  const handlers: Record<string, AgentToolHandler> = {
-    autoFitRows: async invoke =>
-      autoFitRowsHandler(contextRef.current, invoke.arguments ?? {}),
-    createWorkbook: async invoke => {
-      const title = invoke.arguments?.title
-      if (typeof title !== 'string' || !title.trim())
+  const registryHandlers = buildPureSheetsHandlers(() => contextRef.current, {
+    beforeInvoke: guard => {
+      if (
+        guard.risk !== 'read' &&
+        guard.name !== 'createWorkbook' &&
+        !mayChangeRef.current()
+      ) {
         throw new AgentSheetsToolError(
-          'A non-empty workbook title is required.',
+          'Wait for the workbook to finish opening, then read getSheetsContext again before changing it.',
         )
-      const create = contextRef.current.createWorkbook
-      if (!create)
-        throw new AgentSheetsToolError('Workbook creation is unavailable.')
-      return { content: formatAgentToolJson(await create(title.trim())) }
+      }
     },
-    openWorkbook: async invoke => {
-      const path = invoke.arguments?.path
-      if (typeof path !== 'string' || !path.trim()) throw new AgentSheetsToolError('Provide the selected workbook path.')
-      const open = contextRef.current.openWorkbook
-      if (!open) throw new AgentSheetsToolError('Workbook opening is unavailable.')
-      return { content: formatAgentToolJson(await open(path.trim())) }
-    },
-    saveWorkbookAsXlsx: async invoke => {
-      const path = invoke.arguments?.path
-      if (typeof path !== 'string' || !path.trim())
-        throw new AgentSheetsToolError('Provide the full path of the .xlsx file to write.')
-      const save = contextRef.current.saveAsXlsx
-      if (!save) throw new AgentSheetsToolError('Saving as Excel is unavailable.')
-      return { content: formatAgentToolJson(await save(path.trim(), invoke.arguments?.overwrite === true)) }
-    },
-    completeWorkbook: async () => {
-      const complete = contextRef.current.completeWorkbook
-      if (!complete)
-        throw new AgentSheetsToolError('Workbook saving is unavailable.')
-      return { content: formatAgentToolJson(await complete()) }
-    },
-    getSheetsContext: async () => getSheetsContextHandler(contextRef.current),
-    readRange: async invoke =>
-      readRangeHandler(contextRef.current, invoke.arguments ?? {}),
-    findInWorkbook: async invoke =>
-      findInWorkbookHandler(contextRef.current, invoke.arguments ?? {}),
-    applyCellChanges: async invoke =>
-      applyCellChangesHandler(contextRef.current, invoke.arguments ?? {}),
-    getExchangeRate: async invoke =>
-      getExchangeRateHandler(contextRef.current, invoke.arguments ?? {}),
-    addChart: async invoke =>
-      addChartHandler(contextRef.current, invoke.arguments ?? {}),
-    listSheetChanges: async invoke =>
-      listSheetChangesHandler(contextRef.current, invoke.arguments ?? {}),
-    addSheet: async invoke =>
-      addSheetHandler(contextRef.current, invoke.arguments ?? {}),
-    renameSheet: async invoke =>
-      renameSheetHandler(contextRef.current, invoke.arguments ?? {}),
-    deleteSheet: async invoke =>
-      deleteSheetHandler(contextRef.current, invoke.arguments ?? {}),
-    formatRange: async invoke =>
-      formatRangeHandler(contextRef.current, invoke.arguments ?? {}),
-    setCellComment: async invoke =>
-      setCellCommentHandler(contextRef.current, invoke.arguments ?? {}),
-  }
+  })
+
+  // Statically key-preserving registration so `scripts/check-manifests.mjs`
+  // verifies every manifest tool has a live registered handler at build time.
   usePlatformAgentTools({
     ready,
-    tools: PURESHEETS_AGENT_TOOL_NAMES,
+    tools: EXPOSED_TOOL_NAMES,
     logLabel: PURESHEETS_AGENT_LOG_LABEL,
     errorType: AgentSheetsToolError,
     handlers: Object.fromEntries(
-      Object.entries(handlers).map(([name, handler]) => [
+      EXPOSED_TOOL_NAMES.map(name => [
         name,
-        async invoke => {
-          if (
-            ![
-              'getSheetsContext',
-              'readRange',
-              'findInWorkbook',
-              'listSheetChanges',
-              'getExchangeRate',
-              'createWorkbook',
-              'openWorkbook',
-            ].includes(name) &&
-            !mayChangeRef.current()
-          )
-            throw new AgentSheetsToolError(
-              'Wait for the workbook to finish opening, then read getSheetsContext again before changing it.',
-            )
-          return handler(invoke)
-        },
+        async (invoke: AgentToolInvokeContext) =>
+          registryHandlers[name]!(invoke),
       ]),
     ),
   })

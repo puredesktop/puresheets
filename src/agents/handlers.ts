@@ -33,7 +33,11 @@ import type {
   WorkbookChart,
   WorkbookSheet,
 } from '../types'
-import type { SheetsAgentToolContext } from './catalog'
+import {
+  AgentSheetsToolError,
+  type PureSheetsAtomicToolName,
+  type SheetsAgentToolContext,
+} from './catalog'
 
 const CHART_TYPES: ReadonlySet<string> = new Set([
   'bar',
@@ -75,7 +79,7 @@ export async function autoFitRowsHandler(context: SheetsAgentToolContext, args: 
   return { content: formatAgentToolJson({ sheet: sheet.name, startRow: start, rowCount: count, fitted: true }) }
 }
 
-function requireDocument(
+export function requireDocument(
   context: SheetsAgentToolContext,
 ): PureSheetsDocument | { error: string } {
   if (!context.document) {
@@ -84,7 +88,7 @@ function requireDocument(
   return context.document
 }
 
-function sheetByRef(
+export function sheetByRef(
   document: PureSheetsDocument,
   ref: string | null | undefined,
 ): WorkbookSheet | undefined {
@@ -770,4 +774,94 @@ export async function getExchangeRateHandler(_context: SheetsAgentToolContext, a
   } catch (error) {
     return agentToolErrorContent(error instanceof Error ? error.message : 'Exchange-rate lookup failed. No workbook changes were made.')
   }
+}
+
+export async function createWorkbookHandler(
+  context: SheetsAgentToolContext,
+  args: Record<string, unknown>,
+): Promise<AgentToolHandlerResult> {
+  const title = args.title
+  if (typeof title !== 'string' || !title.trim()) {
+    throw new AgentSheetsToolError('A non-empty workbook title is required.')
+  }
+  const create = context.createWorkbook
+  if (!create) {
+    throw new AgentSheetsToolError('Workbook creation is unavailable.')
+  }
+  return { content: formatAgentToolJson(await create(title.trim())) }
+}
+
+export async function openWorkbookHandler(
+  context: SheetsAgentToolContext,
+  args: Record<string, unknown>,
+): Promise<AgentToolHandlerResult> {
+  const path = args.path
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new AgentSheetsToolError('Provide the selected workbook path.')
+  }
+  const open = context.openWorkbook
+  if (!open) {
+    throw new AgentSheetsToolError('Workbook opening is unavailable.')
+  }
+  return { content: formatAgentToolJson(await open(path.trim())) }
+}
+
+export async function saveWorkbookAsXlsxHandler(
+  context: SheetsAgentToolContext,
+  args: Record<string, unknown>,
+): Promise<AgentToolHandlerResult> {
+  const path = args.path
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new AgentSheetsToolError(
+      'Provide the full path of the .xlsx file to write.',
+    )
+  }
+  const save = context.saveAsXlsx
+  if (!save) {
+    throw new AgentSheetsToolError('Saving as Excel is unavailable.')
+  }
+  return {
+    content: formatAgentToolJson(
+      await save(path.trim(), args.overwrite === true),
+    ),
+  }
+}
+
+export async function completeWorkbookHandler(
+  context: SheetsAgentToolContext,
+): Promise<AgentToolHandlerResult> {
+  const complete = context.completeWorkbook
+  if (!complete) {
+    throw new AgentSheetsToolError('Workbook saving is unavailable.')
+  }
+  return { content: formatAgentToolJson(await complete()) }
+}
+
+export type PureSheetsAtomicRunner = (
+  context: SheetsAgentToolContext,
+  args: Record<string, unknown>,
+) => Promise<AgentToolHandlerResult> | AgentToolHandlerResult
+
+export const PURESHEETS_ATOMIC_RUNNERS: Record<
+  PureSheetsAtomicToolName,
+  PureSheetsAtomicRunner
+> = {
+  getSheetsContext: context => getSheetsContextHandler(context),
+  readRange: (context, args) => readRangeHandler(context, args),
+  applyCellChanges: (context, args) => applyCellChangesHandler(context, args),
+  completeWorkbook: context => completeWorkbookHandler(context),
+  openWorkbook: (context, args) => openWorkbookHandler(context, args),
+  createWorkbook: (context, args) => createWorkbookHandler(context, args),
+  saveWorkbookAsXlsx: (context, args) =>
+    saveWorkbookAsXlsxHandler(context, args),
+  listSheetChanges: (context, args) => listSheetChangesHandler(context, args),
+  findInWorkbook: (context, args) => findInWorkbookHandler(context, args),
+  addSheet: (context, args) => addSheetHandler(context, args),
+  renameSheet: (context, args) => renameSheetHandler(context, args),
+  deleteSheet: (context, args) => deleteSheetHandler(context, args),
+  formatRange: (context, args) => formatRangeHandler(context, args),
+  autoFitRows: (context, args) => autoFitRowsHandler(context, args),
+  setCellComment: (context, args) => setCellCommentHandler(context, args),
+  addChart: (context, args) => addChartHandler(context, args),
+  getExchangeRate: (context, args) => getExchangeRateHandler(context, args),
 }

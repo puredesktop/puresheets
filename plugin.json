@@ -48,100 +48,441 @@
     "agents": {
       "tools": [
         {
-          "name": "openWorkbook",
+          "name": "fn_workbookBriefing",
           "risk": "read",
-          "requiresApproval": false,
-          "description": "Open an existing .sheets/.sheets.html workbook, or import an Excel .xlsx or a .csv/.tsv from an exact path. Use before auditing a spreadsheet supplied by the user; do not audit a blank restored workbook instead. Flushes current edits before switching. Excel and CSV imports create a separate native workbook and leave the original file as it is. An .xlsx keeps every sheet and its name, values and formulas (cross-sheet ones too), number formats, merged cells, column widths and row heights, bold/italic/fill/font colour/borders/alignment and frozen panes; returns the title, source path and warnings naming anything that did not come over. Read getSheetsContext and readRange next. Call completeWorkbook after any changes to save a separate deliverable.",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "path": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "required": [
-              "path"
-            ]
-          }
-        },
-        {
-          "name": "saveWorkbookAsXlsx",
-          "risk": "write",
-          "requiresApproval": true,
-          "description": "Save a copy of the current workbook as an Excel .xlsx file at an exact path, the same as the menu's Save as Excel. Writes every sheet with its values and formulas, number formats, merged cells, column widths and row heights, cell styles, frozen panes and notes. The workbook stays bound to its own .sheets file; this does not replace completeWorkbook. Refuses to replace an existing file unless overwrite is true, which needs the user's say-so. Returns the path, the sheets written and warnings naming what Excel will not get (charts, validation and conditional-formatting rules, locks).",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "path": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Absolute path ending in .xlsx."
-              },
-              "overwrite": {
-                "type": "boolean",
-                "description": "Replace an existing file at path. Only when the user asked for it."
-              }
-            },
-            "required": [
-              "path"
-            ]
-          }
-        },
-        {
-          "name": "autoFitRows",
-          "risk": "write",
-          "requiresApproval": true,
-          "description": "Fit row heights using the live spreadsheet renderer after setting content, fonts and column widths. Enables text wrapping across the specified whole rows. Use for prose tables before completeWorkbook to avoid clipped text; not a content-quality check. Refused on protected sheets or when the renderer is unavailable.",
+          "description": "Inspect the open workbook in one call: returns title, version token for expectedVersion, active sheet, selection, named ranges, per-sheet structural metrics (used range, formula/error/validation/comment/chart counts, locked ranges, headers, and computed preview rows), and recent agent log entries. Replaces getSheetsContext + multiple readRange + listSheetChanges round-trips.",
           "inputSchema": {
             "type": "object",
             "properties": {
               "sheet": {
-                "type": "string"
+                "type": "string",
+                "description": "Optional sheet name or id to brief. Omit to brief every visible sheet in the workbook."
               },
-              "startRow": {
+              "previewRows": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 0,
+                "maximum": 20,
+                "description": "Number of leading rows per sheet to preview with computed values (default 5, max 20)."
               },
-              "rowCount": {
+              "maxPreviewColumns": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 100
+                "maximum": 20,
+                "description": "Maximum columns included in each sheet preview row (default 12, max 20)."
+              },
+              "recentChangesLimit": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 25,
+                "description": "Number of recent agent log entries to include (default 5, max 25)."
               }
-            },
-            "required": [
-              "startRow",
-              "rowCount"
-            ]
-          }
+            }
+          },
+          "requiresApproval": false
         },
         {
-          "name": "createWorkbook",
-          "risk": "write",
-          "requiresApproval": true,
-          "description": "Start a NEW blank workbook without replacing the currently open file. Required when asked to create a new deliverable or preserve existing documents: a workbook restored on app startup is not permission to overwrite it. Flushes pending edits before switching; on failure the current workbook stays open. Then populate this fresh workbook and call completeWorkbook to save it to a unique new package. Do not use for requested edits to the current workbook.",
+          "name": "fn_auditWorkbookFormulasAndData",
+          "risk": "read",
+          "description": "Audit formulas, cross-sheet references, validation rules, and data quality across the workbook (or one sheet) in a single pass. Detects formula error values (#DIV/0!, #REF!, #NAME?, #VALUE!, #N/A, #NUM!), broken cross-sheet references, validation rule violations, hardcoded numeric overrides inside formula columns, and numeric strings stored as text.",
           "inputSchema": {
             "type": "object",
             "properties": {
-              "title": {
+              "sheet": {
                 "type": "string",
-                "minLength": 1
+                "description": "Optional sheet name or id to audit. Omit to audit every visible sheet in the workbook."
+              },
+              "maxFindings": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "description": "Maximum findings returned per category (default 50, max 200)."
+              }
+            }
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "fn_profileSheetData",
+          "risk": "read",
+          "description": "Profile a sheet or A1 range (up to 25,000 cells) deterministically in one call: infers column types, non-empty/blank/distinct counts, exact numeric statistics (min, max, sum, mean, median), top categorical values, and optional grouped rollup by any column without writing helper formulas.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string",
+                "description": "Sheet name or id to profile. Defaults to the active sheet."
+              },
+              "range": {
+                "type": "string",
+                "description": "Optional A1 range to profile. Omit to profile the full used range of the sheet."
+              },
+              "hasHeader": {
+                "type": "boolean",
+                "description": "Whether the first row of the range contains column headers (default true)."
+              },
+              "groupByColumn": {
+                "type": "string",
+                "description": "Optional column letter (e.g. \"A\") or header name to compute a grouped rollup."
+              },
+              "valueColumn": {
+                "type": "string",
+                "description": "Optional numeric column letter or header name to aggregate per group when groupByColumn is set (defaults to the first numeric column)."
+              },
+              "topValuesLimit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "Maximum frequent values listed per column (default 5, max 20)."
+              }
+            }
+          },
+          "requiresApproval": false
+        },
+        {
+          "name": "fn_buildStructuredSheetTable",
+          "risk": "write",
+          "description": "Create or populate a structured spreadsheet table in one atomic, version-checked operation: optionally creates a new sheet, writes headers, data rows (values or =formulas), an optional auto-SUM summary row, header/column formatting, cell notes, an optional chart, and live row auto-fit, then returns computed readback and fresh version. Supports dryRun: true to validate before writing.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sheet": {
+                "type": "string",
+                "description": "Target sheet name/id, or new sheet name when createSheet is true."
+              },
+              "createSheet": {
+                "type": "boolean",
+                "description": "Create a new sheet before writing (default false; refuses duplicates)."
+              },
+              "expectedVersion": {
+                "type": "string",
+                "description": "Exact workbook version; required when createSheet is false."
+              },
+              "startCell": {
+                "type": "string",
+                "description": "Top-left A1 anchor cell (default \"A1\")."
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "1–50 column header labels."
+              },
+              "rows": {
+                "type": "array",
+                "description": "2D row grid (strings, numbers, =formulas, booleans, null; max 400 total cells).",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "summaryRow": {
+                "type": "object",
+                "description": "Optional total row below rows: { label?, mode?: \"auto-sum\"|\"custom\", formulas? }.",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "auto-sum",
+                      "custom"
+                    ]
+                  },
+                  "formulas": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "styleHeader": {
+                "type": "boolean",
+                "description": "Style header row bold with fill and border (default true)."
+              },
+              "columnFormats": {
+                "type": "array",
+                "description": "Per-column formatting by 0-based index, column letter, or header name.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "column": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    },
+                    "numberFormat": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "number",
+                        "currency",
+                        "percent",
+                        "date"
+                      ]
+                    },
+                    "decimals": {
+                      "type": "number"
+                    },
+                    "align": {
+                      "type": "string",
+                      "enum": [
+                        "left",
+                        "center",
+                        "right"
+                      ]
+                    },
+                    "wrap": {
+                      "type": "string",
+                      "enum": [
+                        "wrap",
+                        "clip",
+                        "overflow"
+                      ]
+                    },
+                    "columnWidth": {
+                      "type": "number",
+                      "minimum": 56,
+                      "maximum": 360
+                    },
+                    "bold": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "column"
+                  ]
+                }
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cell": {
+                      "type": "string"
+                    },
+                    "comment": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "cell",
+                    "comment"
+                  ]
+                }
+              },
+              "chart": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "bar",
+                      "line",
+                      "area",
+                      "pie",
+                      "donut",
+                      "scatter"
+                    ]
+                  },
+                  "range": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "autoFitRows": {
+                "type": "boolean"
+              },
+              "summary": {
+                "type": "string",
+                "description": "One-line summary recorded in the workbook agent log."
+              },
+              "dryRun": {
+                "type": "boolean"
               }
             },
             "required": [
-              "title"
+              "sheet",
+              "headers",
+              "rows",
+              "summary"
             ]
-          }
+          },
+          "requiresApproval": true
         },
         {
-          "name": "completeWorkbook",
+          "name": "fn_applyFormulaAndFormatBatch",
           "risk": "write",
-          "requiresApproval": false,
-          "description": "Save the current workbook, verify its saved content, and return its durable deliverable receipt. Required after all requested writes before completing a mission. Use the returned workbook paths in the final result, never an upstream source path. Retry after a reported save or concurrent-change error; do not claim completion on error.",
+          "description": "Apply a version-checked batch of cell edits (values/formulas up to 400 cells), multiple range formatting specs, and cell notes on an existing sheet in one atomic transaction, then return computed formula readback, error checks, and the fresh workbook version. Supports dryRun: true for preview.",
           "inputSchema": {
             "type": "object",
-            "properties": {}
-          }
+            "properties": {
+              "sheet": {
+                "type": "string",
+                "description": "Explicit target sheet name or id."
+              },
+              "expectedVersion": {
+                "type": "string",
+                "description": "Exact workbook version token."
+              },
+              "summary": {
+                "type": "string",
+                "description": "One-line summary for the workbook agent log."
+              },
+              "range": {
+                "type": "string",
+                "description": "Optional A1 bounding range for cellChanges."
+              },
+              "cellChanges": {
+                "type": "array",
+                "description": "Up to 400 cell edits ({ cell, value, kind? }).",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cell": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "number",
+                        "formula",
+                        "blank"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "cell",
+                    "value"
+                  ]
+                }
+              },
+              "formats": {
+                "type": "array",
+                "description": "Up to 25 range formatting specs (bold, italic, underline, border, fontSize, textColor, fillColor, align, numberFormat, decimals, wrap, columnWidth, rowHeight).",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "range": {
+                      "type": "string"
+                    },
+                    "bold": {
+                      "type": "boolean"
+                    },
+                    "italic": {
+                      "type": "boolean"
+                    },
+                    "underline": {
+                      "type": "boolean"
+                    },
+                    "border": {
+                      "type": "boolean"
+                    },
+                    "fontSize": {
+                      "type": "number"
+                    },
+                    "textColor": {
+                      "type": "string"
+                    },
+                    "fillColor": {
+                      "type": "string"
+                    },
+                    "align": {
+                      "type": "string",
+                      "enum": [
+                        "left",
+                        "center",
+                        "right"
+                      ]
+                    },
+                    "numberFormat": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "number",
+                        "currency",
+                        "percent",
+                        "date"
+                      ]
+                    },
+                    "decimals": {
+                      "type": "number"
+                    },
+                    "wrap": {
+                      "type": "string",
+                      "enum": [
+                        "wrap",
+                        "clip",
+                        "overflow"
+                      ]
+                    },
+                    "columnWidth": {
+                      "type": "number",
+                      "minimum": 56,
+                      "maximum": 360
+                    },
+                    "rowHeight": {
+                      "type": "number",
+                      "minimum": 24,
+                      "maximum": 160
+                    }
+                  },
+                  "required": [
+                    "range"
+                  ]
+                }
+              },
+              "comments": {
+                "type": "array",
+                "description": "Up to 50 cell notes ({ cell, comment }); empty comment clears.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cell": {
+                      "type": "string"
+                    },
+                    "comment": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "cell",
+                    "comment"
+                  ]
+                }
+              },
+              "dryRun": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "sheet",
+              "expectedVersion",
+              "summary"
+            ]
+          },
+          "requiresApproval": true
         },
         {
           "name": "getSheetsContext",
@@ -171,29 +512,9 @@
           "requiresApproval": false
         },
         {
-          "name": "findInWorkbook",
-          "risk": "read",
-          "description": "Find cells containing text across the workbook (or one sheet). Returns sheet, cell, and value, capped at 50 matches.",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "query": {
-                "type": "string"
-              },
-              "sheet": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "query"
-            ]
-          },
-          "requiresApproval": false
-        },
-        {
           "name": "applyCellChanges",
           "risk": "write",
-          "description": "Write cell changes to a sheet directly. Every write is recorded in the workbook's agent log with before/after. Pass the sheet, the range the work covers, the cell changes, and a one-line summary \u2014 it is the line the user reads in the log. Requires an explicit sheet, target range and current expectedVersion from readRange/getSheetsContext. All changed cells must lie in the target range; stale workbook proposals are rejected. Call completeWorkbook after changes for saved artifact evidence.",
+          "description": "Write cell changes to a sheet directly. Every write is recorded in the workbook's agent log with before/after. Pass the sheet, the range the work covers, the cell changes, and a one-line summary — it is the line the user reads in the log. Requires an explicit sheet, target range and current expectedVersion from readRange/getSheetsContext. All changed cells must lie in the target range; stale workbook proposals are rejected. Call completeWorkbook after changes for saved artifact evidence.",
           "inputSchema": {
             "type": "object",
             "properties": {
@@ -251,233 +572,95 @@
           "requiresApproval": true
         },
         {
-          "name": "getExchangeRate",
-          "risk": "read",
-          "description": "Fetch a dated published reference exchange rate from Frankfurter. Returns rate, asOf date and source URL; no models and no workbook mutations. Use the rate in formulas, cite its source/date, and never invent a rate on failure.",
+          "name": "completeWorkbook",
+          "risk": "write",
+          "description": "Save the current workbook, verify its saved content, and return its durable deliverable receipt. Required after all requested writes before completing a mission. Use the returned workbook paths in the final result, never an upstream source path. Retry after a reported save or concurrent-change error; do not claim completion on error.",
           "inputSchema": {
             "type": "object",
-            "properties": {
-              "from": {
-                "type": "string",
-                "description": "Source ISO currency code, e.g. USD"
-              },
-              "to": {
-                "type": "string",
-                "description": "Target ISO currency code, e.g. EUR"
-              }
-            },
-            "required": [
-              "from",
-              "to"
-            ]
+            "properties": {}
           },
           "requiresApproval": false
         },
         {
-          "name": "addChart",
-          "risk": "write",
-          "description": "Add a chart from a range (bar, line, area, pie, donut, scatter). The range needs labels and numeric values. Recorded in the agent log.",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "sheet": {
-                "type": "string"
-              },
-              "range": {
-                "type": "string"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "bar",
-                  "line",
-                  "area",
-                  "pie",
-                  "donut",
-                  "scatter"
-                ]
-              },
-              "summary": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "range"
-            ]
-          },
-          "requiresApproval": true
-        },
-        {
-          "name": "listSheetChanges",
+          "name": "discoverAppTools",
           "risk": "read",
-          "description": "The agent log: recent agent writes to the workbook, newest first, with tool, summary, sheet, range, and changed-cell counts. Check it before repeating work another agent already did.",
+          "requiresApproval": false,
+          "description": "Discover PureSheets's extended specialist tools (13 tools across annotations, charts, formatting, reference, search, sheets, workbook) and composite functions (5 workflows). Prefer calling exposed composite functions and core tools first; use discoverAppTools when an edge case needs a specialist tool, then call it via callExtendedReadTool (for read-only tools) or callExtendedTool (for mutating tools).",
           "inputSchema": {
             "type": "object",
             "properties": {
-              "limit": {
-                "type": "number"
+              "query": {
+                "type": "string",
+                "description": "Optional keywords describing the capability you need (e.g. \"annotations\", \"charts\", \"formatting\", \"reference\", \"search\")."
+              },
+              "category": {
+                "type": "string",
+                "description": "Optional category filter (annotations, charts, formatting, reference, search, sheets, workbook, or \"all\")."
+              },
+              "names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional exact tool names to fetch full JSON input schemas for."
+              },
+              "includeFunctions": {
+                "type": "boolean",
+                "description": "Include already-exposed composite functions and core tools in the listing (default false: searches extended tools first)."
               }
             }
-          },
-          "requiresApproval": false
+          }
         },
         {
-          "name": "addSheet",
-          "risk": "write",
-          "description": "Add a blank sheet to the workbook and make it active. Refuses a name an existing sheet already carries.",
+          "name": "callExtendedReadTool",
+          "risk": "read",
+          "requiresApproval": false,
+          "description": "Call one of PureSheets's read-only extended specialist tools discovered via discoverAppTools (categories: annotations, charts, formatting, reference, search, sheets, workbook). Strictly refuses mutating, destructive, external, or release tools.",
           "inputSchema": {
             "type": "object",
             "properties": {
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": []
-          },
-          "requiresApproval": true
-        },
-        {
-          "name": "renameSheet",
-          "risk": "write",
-          "description": "Rename a sheet. Refuses a name another sheet already carries. Recorded in the agent log.",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "sheet": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "name"
-            ]
-          },
-          "requiresApproval": true
-        },
-        {
-          "name": "deleteSheet",
-          "risk": "destructive",
-          "description": "Delete a sheet by name or id \u2014 never defaults to the active sheet, and the last sheet cannot be deleted. Recorded in the agent log with its populated-cell count.",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "sheet": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "sheet"
-            ]
-          },
-          "requiresApproval": true
-        },
-        {
-          "name": "formatRange",
-          "risk": "write",
-          "description": "Apply cell formatting over an A1 range: bold, italic, underline, border, fontSize, textColor/fillColor (#RRGGBB), align, numberFormat, decimals, wrap (wrap|clip|overflow). Optional columnWidth (56\u2013360 pixels) and rowHeight (24\u2013160 pixels) resize entire columns/rows intersecting the range; size changes are refused on protected sheets. For prose tables, use wrapping and suitable sizes so content is readable; keep source IDs in concise notes rather than oversized prose cells. Recorded in the agent log.",
-          "inputSchema": {
-            "type": "object",
-            "properties": {
-              "sheet": {
-                "type": "string"
-              },
-              "range": {
-                "type": "string"
-              },
-              "bold": {
-                "type": "boolean"
-              },
-              "wrap": {
+              "tool": {
                 "type": "string",
-                "enum": [
-                  "wrap",
-                  "clip",
-                  "overflow"
-                ]
+                "description": "Exact name of a read-only extended tool from discoverAppTools."
               },
-              "columnWidth": {
-                "type": "number",
-                "minimum": 56,
-                "maximum": 360
-              },
-              "rowHeight": {
-                "type": "number",
-                "minimum": 24,
-                "maximum": 160
-              },
-              "italic": {
-                "type": "boolean"
-              },
-              "underline": {
-                "type": "boolean"
-              },
-              "border": {
-                "type": "boolean"
-              },
-              "fontSize": {
-                "type": "number"
-              },
-              "textColor": {
-                "type": "string"
-              },
-              "fillColor": {
-                "type": "string"
-              },
-              "align": {
-                "type": "string",
-                "enum": [
-                  "left",
-                  "center",
-                  "right"
-                ]
-              },
-              "numberFormat": {
-                "type": "string",
-                "enum": [
-                  "text",
-                  "number",
-                  "currency",
-                  "percent",
-                  "date"
-                ]
-              },
-              "decimals": {
-                "type": "number"
-              },
-              "summary": {
-                "type": "string"
+              "arguments": {
+                "type": "object",
+                "description": "Arguments object matching the tool’s inputSchema."
               }
             },
             "required": [
-              "range"
+              "tool"
             ]
-          },
-          "requiresApproval": true
+          }
         },
         {
-          "name": "setCellComment",
+          "name": "callExtendedTool",
           "risk": "write",
-          "description": "Set or clear the note on one cell. An empty comment clears it. Notes annotate \u2014 they never change cell values.",
+          "requiresApproval": true,
+          "riskWhen": {
+            "confirmDestructive": "destructive"
+          },
+          "description": "Call one of PureSheets's mutating extended specialist tools discovered via discoverAppTools (categories: annotations, charts, formatting, reference, search, sheets, workbook). For destructive tools, set confirmDestructive: true after checking with the user. Strictly refuses read-only tools (use callExtendedReadTool), external tools, permanent-delete tools, and release tools.",
           "inputSchema": {
             "type": "object",
             "properties": {
-              "sheet": {
-                "type": "string"
+              "tool": {
+                "type": "string",
+                "description": "Exact name of a mutating extended tool from discoverAppTools."
               },
-              "cell": {
-                "type": "string"
+              "arguments": {
+                "type": "object",
+                "description": "Arguments object matching the tool’s inputSchema."
               },
-              "comment": {
-                "type": "string"
+              "confirmDestructive": {
+                "type": "boolean",
+                "description": "Required (true) when calling an extended tool marked risk: \"destructive\"."
               }
             },
             "required": [
-              "cell"
+              "tool"
             ]
-          },
-          "requiresApproval": true
+          }
         }
       ]
     },
