@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import ExcelJS from 'exceljs'
+import JSZip from 'jszip'
 import {
   base64ToBytes,
   bytesToBase64,
@@ -179,6 +180,10 @@ describe('Excel import', () => {
       expect(odds).toContain(phrase)
     // Features now natively supported round-trip without loss warnings:
     const sheet = sheetNamed(document, 'Odds')
+    expect(document.workbook.namedRanges).toMatchObject([{ name: 'Labels', sheetId: sheet.id, range: 'A1:A3' }])
+    expect(sheet.validations).toMatchObject([{ range: 'B1:B1', kind: 'list', options: ['Yes', 'No'] }])
+    expect(sheet.conditionalFormats).toMatchObject([{ range: 'C1:C5', condition: { kind: 'greater', value: '5' }, style: { bold: true } }])
+    // What it could not format, it still brought in.
     expect(sheet.cells.A1?.value).toBe('mixed text')
     expect(sheet.cells.A2?.value).toBe('Pure Science')
     expect(sheet.cells.A2?.hyperlink).toBeTruthy()
@@ -192,6 +197,33 @@ describe('Excel import', () => {
     expect(sheetNamed(document, 'Lookups').hidden).toBe(true)
     expect(sheetNamed(document, 'Lookups').cells.A1?.value).toBe('kept')
     expect(document.workbook.namedRanges?.length).toBeGreaterThan(0)
+  })
+
+  it('keeps supported Excel pivot fields so the summary can be refreshed in PureSheets', async () => {
+    const book = new ExcelJS.Workbook()
+    const source = book.addWorksheet('Sales')
+    source.addRows([['Region', 'Revenue'], ['East', 100], ['West', 50]])
+    const summary = book.addWorksheet('Summary')
+    summary.addRows([['Region', 'Revenue'], ['East', 100], ['West', 50]])
+    const zip = await JSZip.loadAsync(await book.xlsx.writeBuffer())
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    const rels = 'http://schemas.openxmlformats.org/package/2006/relationships'
+    zip.file('xl/worksheets/_rels/sheet2.xml.rels', `<Relationships xmlns="${rels}"><Relationship Id="rId1" Type="${rel}/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>`)
+    zip.file('xl/pivotTables/_rels/pivotTable1.xml.rels', `<Relationships xmlns="${rels}"><Relationship Id="rId1" Type="${rel}/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition1.xml"/></Relationships>`)
+    zip.file('xl/pivotTables/pivotTable1.xml', '<pivotTableDefinition cacheId="1"><location ref="A1:B3"/><pivotFields><pivotField/><pivotField/></pivotFields><rowFields><field x="0"/></rowFields><dataFields><dataField fld="1" subtotal="sum"/></dataFields></pivotTableDefinition>')
+    zip.file('xl/pivotCache/pivotCacheDefinition1.xml', '<pivotCacheDefinition><cacheSource type="worksheet"><worksheetSource sheet="Sales" ref="A1:B3"/></cacheSource></pivotCacheDefinition>')
+    const { document, warnings } = await importXlsxWorkbook(await zip.generateAsync({ type: 'uint8array' }), 'Sales')
+    expect(warnings).toEqual([])
+    expect(document.workbook.sheets[1].pivot).toMatchObject({
+      sourceSheetId: document.workbook.sheets[0].id,
+      sourceRange: 'A1:B3',
+      rows: [{ columnIndex: 0, label: 'Region' }],
+      columns: [],
+      values: [{ columnIndex: 1, label: 'Revenue', aggregate: 'sum' }],
+      output: 'A1',
+      outputRows: 3,
+      outputColumns: 2,
+    })
   })
 
   it('names charts, pivot tables and macros it finds in the file', async () => {
@@ -404,17 +436,41 @@ describe('Excel export', () => {
     expect(workbook.getWorksheet('Sheet 1')!.getCell('B3').value).toMatchObject({ formula: 'SUM(B2:B2)', result: 1200 })
   })
 
-  it('exports validations cleanly and names what Excel will not get', async () => {
+  it('round trips editable charts, validation, conditional styles and named-range formulas', async () => {
     const base = buildDocument()
+    const source = upsertCell(base.workbook.sheets[0], 'E2', '=SUM(Revenue)')
     const sheet: WorkbookSheet = {
-      ...base.workbook.sheets[0],
-      charts: [{ id: 'c1', title: 'Revenue', type: 'bar', range: 'A1:B2', labels: ['North'], values: [1200] }],
-      validations: [{ id: 'v1', range: 'C1:C3', kind: 'list', options: ['Yes', 'No'] }],
+      ...source,
+      charts: [{ id: 'c1', title: 'Revenue & margin', type: 'bar', range: 'A2:B2', labels: ['North'], values: [1200], xLabel: 'Region', yLabel: 'Sales' }],
+      validations: [
+        { id: 'v1', range: 'C1:C3', kind: 'list', options: ['Yes', 'No'] },
+        { id: 'v2', range: 'D1:D4', kind: 'number-range', min: 0, max: 500, whole: true },
+        { id: 'v3', range: 'F1:F4', kind: 'date' },
+      ],
+      conditionalFormats: [
+        { id: 'cf1', range: 'B1:B4', condition: { kind: 'between', value: '1', value2: '450' }, style: { bold: true, fillColor: '#ffaa00' } },
+        { id: 'cf2', range: 'C1:C3', condition: { kind: 'text-contains', value: 'quote "test"' }, style: { textColor: '#ac2211' } },
+      ],
     }
-    const { bytes, warnings } = await exportXlsxWorkbook({ ...base, workbook: { ...base.workbook, sheets: [sheet] } })
-    expect(warnings).toEqual(['Sheet 1: charts (Excel will not get them).'])
-    const reimported = await importXlsxWorkbook(bytes, 'Roundtrip')
-    expect(reimported.document.workbook.sheets[0].validations?.length).toBeGreaterThan(0)
+    const { bytes, warnings } = await exportXlsxWorkbook({
+      ...base, workbook: { ...base.workbook, sheets: [sheet], namedRanges: [{ id: 'nr-1', name: 'Revenue', sheetId: sheet.id, range: 'B2' }] },
+    })
+    expect(warnings).toEqual([])
+    const reopened = await importXlsxWorkbook(bytes, 'Reopened')
+    expect(reopened.warnings).toEqual([])
+    const imported = reopened.document.workbook.sheets[0]
+    expect(imported.charts).toMatchObject([{ title: 'Revenue & margin', type: 'bar', labels: ['North'], values: [1200], xLabel: 'Region', yLabel: 'Sales' }])
+    expect(imported.validations).toMatchObject([
+      { range: 'C1:C3', kind: 'list', options: ['Yes', 'No'] },
+      { range: 'D1:D4', min: 0, max: 500, whole: true },
+      { range: 'F1:F4', kind: 'date' },
+    ])
+    expect(imported.conditionalFormats).toMatchObject([
+      { range: 'B1:B4', condition: { kind: 'between', value: '1', value2: '450' }, style: { bold: true, fillColor: '#ffaa00' } },
+      { range: 'C1:C3', condition: { kind: 'text-contains', value: 'quote "test"' }, style: { textColor: '#ac2211' } },
+    ])
+    expect(reopened.document.workbook.namedRanges).toMatchObject([{ name: 'Revenue', sheetId: imported.id, range: 'B2' }])
+    expect(computedCellValue(imported, 'E2', reopened.document.workbook)).toBe('1200')
   })
 
   it('renames sheets Excel would refuse, and the formulas that point at them', async () => {

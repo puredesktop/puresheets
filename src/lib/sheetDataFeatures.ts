@@ -175,6 +175,7 @@ export function validateValue(
     }
   }
   if (rule.kind === 'number-range') {
+    if (rule.whole && !Number.isInteger(Number(value))) return { valid: false, message: 'Enter a whole number.' }
     const numeric = Number(trimmed)
     if (!Number.isFinite(numeric)) {
       return { valid: false, message: 'Value must be a number' }

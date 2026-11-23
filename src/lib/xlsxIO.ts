@@ -1,8 +1,10 @@
 import ExcelJS from 'exceljs'
 import JSZip from 'jszip'
+import { addChartsToXlsx, child, importRangeNames, readWorkbookParts, readWorksheetObjects, worksheetValidations } from './xlsxParts'
+import { qualifiedRange } from './rangeNames'
+import { importValidation, exportValidation, importConditional, exportConditional } from './xlsxRules'
 import {
   cellKey,
-  cellsInRange,
   columnLabel,
   computedCellValue,
   createBlankSheet,
@@ -18,7 +20,6 @@ import { DEFAULT_COLUMN_COUNT, DEFAULT_ROW_COUNT } from '../constants'
 import type {
   CellStyle,
   ConditionalFormatRule,
-  NamedRange,
   PureSheetsDocument,
   SheetCell,
   ValidationRule,
@@ -56,6 +57,7 @@ export async function importXlsxWorkbook(
 ): Promise<XlsxImportResult> {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
   const workbook = await loadWorkbook(bytes)
+  const parts = await readWorkbookParts(bytes)
   const palette = themePalette(
     (workbook as unknown as { _themes?: Record<string, string> })._themes?.theme1,
   )
@@ -63,7 +65,7 @@ export async function importXlsxWorkbook(
   const sheets: WorkbookSheet[] = []
   let importedCells = 0
 
-  workbook.eachSheet(worksheet => {
+  for (const worksheet of workbook.worksheets) {
     const name = worksheet.name || `Sheet ${sheets.length + 1}`
     const sheetLosses = new LossCounter()
     const cells: Record<string, SheetCell> = {}
@@ -134,19 +136,25 @@ export async function importXlsxWorkbook(
     const isHiddenSheet = Boolean(worksheet.state && worksheet.state !== 'visible')
     const images = worksheet.getImages().length
     if (images) sheetLosses.add('pictures', images)
-
-    const importedValidations = importXlsxValidations(
-      (worksheet as unknown as { dataValidations?: { model?: Record<string, unknown> } })
-        .dataValidations?.model,
-      sheetLosses,
-    )
-    const importedConditionalFormats = importXlsxConditionalFormats(
-      (worksheet as unknown as { conditionalFormattings?: unknown[] })
-        .conditionalFormattings,
-      palette,
-      sheetLosses,
-    )
-
+    const validations: ValidationRule[] = []
+    const conditionalFormats: ConditionalFormatRule[] = []
+    for (const rule of await worksheetValidations(parts, name)) {
+      const ranges = (rule.attrs.sqref ?? '').split(/\s+/).map(normalizeRangeToken).filter((item): item is string => !!item)
+      const condition = importValidation(rule.attrs.type, rule.attrs.operator, child(rule, 'formula1')?.text, child(rule, 'formula2')?.text)
+      if (condition && ranges.length) {
+        for (const range of ranges) validations.push({ ...condition, range, id: 'excel-validation-' + validations.length })
+      } else sheetLosses.add('unsupported data-validation rules')
+    }
+    const formats = (worksheet as unknown as { conditionalFormattings?: ExcelJS.ConditionalFormattingOptions[] }).conditionalFormattings ?? []
+    for (const group of formats) {
+      const ranges = group.ref.split(/\s+/).map(normalizeRangeToken).filter((item): item is string => !!item)
+      for (const rule of group.rules) {
+        const mapped = importConditional(rule, color => resolveColor(color, palette))
+        if (mapped && ranges.length) {
+          for (const range of ranges) conditionalFormats.push({ ...mapped, range, id: 'excel-format-' + conditionalFormats.length })
+        } else sheetLosses.add('unsupported conditional-formatting rules')
+      }
+    }
     const tables = Object.keys(
       (worksheet as unknown as { tables?: Record<string, unknown> }).tables ?? {},
     ).length
@@ -177,18 +185,16 @@ export async function importXlsxWorkbook(
       filterRow: hasAutoFilter ? 0 : undefined,
       filterHasHeader: hasAutoFilter ? true : undefined,
       comments: Object.keys(comments).length ? comments : undefined,
-      validations: importedValidations.length ? importedValidations : undefined,
-      conditionalFormats: importedConditionalFormats.length
-        ? importedConditionalFormats
-        : undefined,
+      validations: validations.length ? validations : undefined,
+      conditionalFormats: conditionalFormats.length ? conditionalFormats : undefined,
     })
-  })
+  }
 
-  const importedNamedRanges = importXlsxNamedRanges(
-    workbook.definedNames.model as Array<{ name?: string; ranges?: string[] }> | undefined,
-    sheets,
-  )
-  for (const part of unsupportedParts(listZipEntries(bytes))) losses.add(part)
+  const { names, skipped } = importRangeNames(parts.workbook, sheets)
+  if (skipped) losses.add('unsupported named ranges', skipped)
+  const entries = listZipEntries(bytes)
+  const objects = await readWorksheetObjects(parts, sheets)
+  for (const item of unsupportedParts(entries, objects)) losses.add(item)
 
   const warnings = losses.lines()
   if (!sheets.length) return { document: createBlankWorkbook(title), warnings }
@@ -202,7 +208,7 @@ export async function importXlsxWorkbook(
     workbook: {
       activeSheetId: firstVisible.id,
       sheets,
-      ...(importedNamedRanges.length ? { namedRanges: importedNamedRanges } : {}),
+      ...(names.length ? { namedRanges: names } : {}),
     },
   })
   return { document, warnings }
@@ -360,7 +366,7 @@ async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
   await assertSafeXlsxArchive(bytes)
   const workbook = new ExcelJS.Workbook()
   try {
-    await workbook.xlsx.load(bytes.slice().buffer as ArrayBuffer)
+    await workbook.xlsx.load(bytes.slice().buffer as ArrayBuffer, { ignoreNodes: ['dataValidations'] })
     return workbook
   } catch (firstError) {
     if (firstError instanceof XlsxSecurityError) throw firstError
@@ -376,7 +382,7 @@ async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
     if (unprefixed) {
       const retry = new ExcelJS.Workbook()
       try {
-        await retry.xlsx.load(unprefixed)
+        await retry.xlsx.load(unprefixed, { ignoreNodes: ['dataValidations'] })
         return retry
       } catch {
         // fall through to the plain message
@@ -892,20 +898,21 @@ export function listZipEntries(bytes: Uint8Array): string[] {
   return names
 }
 
-export function unsupportedParts(entries: string[]): string[] {
+export function unsupportedParts(entries: string[], imported = { chartCount: 0, pivotCount: 0 }): string[] {
   const count = (pattern: RegExp) => entries.filter(entry => pattern.test(entry)).length
   const parts: string[] = []
-  const charts = count(/^xl\/charts\/chart\d+\.xml$/)
-  if (charts) parts.push(`${charts} chart${charts === 1 ? '' : 's'} (left out; make them again with Chart)`)
-  const pivots = count(/^xl\/pivotTables\/pivotTable\d+\.xml$/)
-  if (pivots)
+  const chartParts = count(/^xl\/charts\/chart\d+\.xml$/)
+  const charts = chartParts - imported.chartCount
+  if (charts > 0) parts.push(`${charts} chart${charts === 1 ? '' : 's'} (left out; make them again with Chart)`)
+  const pivots = count(/^xl\/pivotTables\/pivotTable\d+\.xml$/) - imported.pivotCount
+  if (pivots > 0)
     parts.push(`${pivots} pivot table${pivots === 1 ? ' (its' : 's (their'} last values came in as plain cells)`)
   if (count(/^xl\/vbaProject\.bin$/)) parts.push('macros (left out)')
   const slicers = count(/^xl\/(slicers|timelines)\//)
   if (slicers) parts.push('slicers and timelines (left out)')
   const links = count(/^xl\/externalLinks\/externalLink\d+\.xml$/)
   if (links) parts.push(`links to ${links} other workbook${links === 1 ? '' : 's'} (formulas that use them will show #REF!)`)
-  if (count(/^xl\/drawings\/drawing\d+\.xml$/) && !charts)
+  if (count(/^xl\/drawings\/drawing\d+\.xml$/) && !chartParts)
     parts.push('drawn shapes and text boxes (left out)')
   return parts
 }
@@ -981,8 +988,20 @@ export async function exportXlsxWorkbook(
         },
       ]
     }
-    exportXlsxValidations(worksheet, sheet.validations)
-    exportXlsxConditionalFormats(worksheet, sheet.conditionalFormats)
+    for (const validation of sheet.validations ?? []) {
+      const rule = exportValidation(validation)
+      const range = normalizeRangeToken(validation.range)
+      if (rule && range) {
+        const rules = (worksheet as unknown as { dataValidations: { add: (ref: string, rule: ExcelJS.DataValidation) => void } }).dataValidations
+        rules.add(range, rule)
+      } else sheetLosses.add('unsupported data-validation rules')
+    }
+    for (const [priority, format] of (sheet.conditionalFormats ?? []).entries()) {
+      const range = normalizeRangeToken(format.range)
+      const rule = range && exportConditional(format, range, priority + 1)
+      if (range && rule) worksheet.addConditionalFormatting({ ref: range, rules: [rule] })
+      else sheetLosses.add('unsupported conditional-formatting rules')
+    }
     if (sheet.filterRow !== undefined) {
       let maxCol = 0
       for (const k of Object.keys(sheet.cells)) {
@@ -991,25 +1010,23 @@ export async function exportXlsxWorkbook(
       }
       worksheet.autoFilter = `A1:${columnLabel(maxCol)}1`
     }
-    if (sheet.charts?.length) sheetLosses.add('charts (Excel will not get them)', sheet.charts.length)
+    if (sheet.pivot) sheetLosses.add('pivot output is exported as cells. Keep the PureSheets workbook to edit the pivot')
     if (sheet.protection?.lockedRanges.length) sheetLosses.add('locked ranges (cells export unlocked)')
     losses.addSection(sheet.name, sheetLosses)
   }
-  for (const nr of document.workbook.namedRanges ?? []) {
-    const sheet = exported.find(s => s.id === nr.sheetId)
-    if (!sheet) continue
-    const targetName = names.get(sheet.name) ?? sheet.name
-    const quoted = /[^A-Za-z0-9_]/.test(targetName)
-      ? `'${targetName.replace(/'/g, "''")}'`
-      : targetName
-    try {
-      workbook.definedNames.add(`${quoted}!${nr.range}`, nr.name)
-    } catch {
-      // skip invalid Excel defined names
-    }
+  for (const entry of document.workbook.namedRanges ?? []) {
+    const sheet = exported.find(sheet => sheet.id === entry.sheetId)
+    if (sheet) {
+      try {
+        workbook.definedNames.add(qualifiedRange(names.get(sheet.name) ?? sheet.name, entry.range), entry.name)
+      } catch {
+        losses.add('named range ' + entry.name + ' (invalid Excel defined name)')
+      }
+    } else losses.add('named range ' + entry.name + ' (its sheet is not exported)')
   }
   const buffer = await workbook.xlsx.writeBuffer()
-  return { bytes: new Uint8Array(buffer as ArrayBuffer), warnings: losses.lines() }
+  const bytes = await addChartsToXlsx(new Uint8Array(buffer as ArrayBuffer), exported.map(sheet => ({ sheet, name: names.get(sheet.name) ?? sheet.name })), document.workbook)
+  return { bytes, warnings: losses.lines() }
 }
 
 /**
@@ -1121,339 +1138,6 @@ function hexToArgb(hex: string): string | undefined {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
-}
-
-// ---------------------------------------------------------------------------
-// Validations, Conditional Formatting, and Named Ranges (.xlsx round-trip)
-// ---------------------------------------------------------------------------
-
-function importXlsxNamedRanges(
-  model: Array<{ name?: string; ranges?: string[] }> | undefined,
-  sheets: WorkbookSheet[],
-): NamedRange[] {
-  if (!Array.isArray(model)) return []
-  const byName = new Map(sheets.map(s => [s.name.toLowerCase(), s]))
-  const out: NamedRange[] = []
-  let idx = 1
-  for (const entry of model) {
-    if (!entry.name || entry.name.startsWith('_xlnm.')) continue
-    const rawRef = entry.ranges?.[0]
-    if (!rawRef) continue
-    const bang = rawRef.lastIndexOf('!')
-    if (bang <= 0) continue
-    const rawSheet = rawRef.slice(0, bang).replace(/^'|'$/g, '').replace(/''/g, "'")
-    const rawRange = rawRef.slice(bang + 1).replace(/\$/g, '')
-    const sheet = byName.get(rawSheet.toLowerCase())
-    const norm = normalizeRangeToken(rawRange)
-    if (!sheet || !norm) continue
-    out.push({
-      id: `nr-xlsx-${idx++}`,
-      name: entry.name.trim(),
-      sheetId: sheet.id,
-      range: norm,
-    })
-  }
-  return out
-}
-
-function importXlsxValidations(
-  model: Record<string, unknown> | undefined,
-  losses: LossCounter,
-): ValidationRule[] {
-  if (!model) return []
-  const out: ValidationRule[] = []
-  let idx = 1
-  for (const [address, raw] of Object.entries(model)) {
-    const norm = normalizeRangeToken(address.replace(/\$/g, ''))
-    const spec = raw as {
-      type?: string
-      formulae?: unknown[]
-      operator?: string
-    } | null
-    if (!norm || !spec?.type) continue
-    if (spec.type === 'list') {
-      const f0 = String(spec.formulae?.[0] ?? '').trim()
-      if (f0.startsWith('"') && f0.endsWith('"')) {
-        const options = f0
-          .slice(1, -1)
-          .split(',')
-          .map(s => s.trim())
-          .filter(Boolean)
-        out.push({ id: `val-xlsx-${idx++}`, range: norm, kind: 'list', options })
-      } else if (f0) {
-        out.push({
-          id: `val-xlsx-${idx++}`,
-          range: norm,
-          kind: 'list',
-          sourceRange: f0.replace(/^=/, ''),
-        })
-      }
-    } else if (spec.type === 'whole' || spec.type === 'decimal') {
-      const n1 = Number(spec.formulae?.[0])
-      const n2 = Number(spec.formulae?.[1])
-      const rule: ValidationRule = {
-        id: `val-xlsx-${idx++}`,
-        range: norm,
-        kind: 'number-range',
-      }
-      if (spec.operator === 'greaterThan' || spec.operator === 'greaterThanOrEqual') {
-        if (Number.isFinite(n1)) rule.min = n1
-      } else if (spec.operator === 'lessThan' || spec.operator === 'lessThanOrEqual') {
-        if (Number.isFinite(n1)) rule.max = n1
-      } else {
-        if (Number.isFinite(n1)) rule.min = n1
-        if (Number.isFinite(n2)) rule.max = n2
-      }
-      out.push(rule)
-    } else if (spec.type === 'date') {
-      out.push({ id: `val-xlsx-${idx++}`, range: norm, kind: 'date' })
-    } else if (spec.type === 'textLength') {
-      const n1 = Number(spec.formulae?.[0])
-      const n2 = Number(spec.formulae?.[1])
-      out.push({
-        id: `val-xlsx-${idx++}`,
-        range: norm,
-        kind: 'text-length',
-        ...(Number.isFinite(n1) ? { min: n1 } : {}),
-        ...(Number.isFinite(n2) ? { max: n2 } : {}),
-      })
-    } else if (spec.type === 'custom' && spec.formulae?.[0]) {
-      out.push({
-        id: `val-xlsx-${idx++}`,
-        range: norm,
-        kind: 'custom-formula',
-        formula: String(spec.formulae[0]),
-      })
-    } else {
-      losses.add('unsupported data-validation rules')
-    }
-  }
-  return out
-}
-
-function importXlsxConditionalFormats(
-  cfs: unknown[] | undefined,
-  palette: string[],
-  losses: LossCounter,
-): ConditionalFormatRule[] {
-  if (!Array.isArray(cfs) || !cfs.length) return []
-  const out: ConditionalFormatRule[] = []
-  let idx = 1
-  for (const rawCf of cfs) {
-    const cf = rawCf as {
-      ref?: string
-      rules?: Array<{
-        type?: string
-        operator?: string
-        formulae?: unknown[]
-        text?: string
-        style?: {
-          font?: Partial<ExcelJS.Font>
-          fill?: { fgColor?: Partial<ExcelJS.Color>; bgColor?: Partial<ExcelJS.Color> }
-        }
-      }>
-    }
-    const range = normalizeRangeToken((cf.ref ?? '').split(/\s+/)[0] ?? '')
-    if (!range || !Array.isArray(cf.rules)) continue
-    for (const r of cf.rules) {
-      const style: CellStyle = {}
-      if (r.style?.font?.bold) style.bold = true
-      if (r.style?.font?.italic) style.italic = true
-      const tc = resolveColor(r.style?.font?.color, palette)
-      if (tc) style.textColor = tc
-      const fc =
-        resolveColor(r.style?.fill?.fgColor, palette) ??
-        resolveColor(r.style?.fill?.bgColor, palette)
-      if (fc) style.fillColor = fc
-      if (!Object.keys(style).length) style.fillColor = '#fff4bf'
-
-      if (r.type === 'cellIs') {
-        const v1 = String(r.formulae?.[0] ?? '')
-        const v2 = r.formulae?.[1] !== undefined ? String(r.formulae[1]) : undefined
-        const opMap: Record<string, ConditionalFormatRule['condition']['kind']> = {
-          greaterThan: 'greater',
-          lessThan: 'less',
-          equal: 'equal',
-          notEqual: 'not-equal',
-          between: 'between',
-        }
-        const kind = opMap[r.operator ?? '']
-        if (kind) {
-          out.push({
-            id: `cf-xlsx-${idx++}`,
-            range,
-            condition: { kind, value: v1, value2: v2 },
-            style,
-          })
-          continue
-        }
-      } else if (r.type === 'containsText' && r.text) {
-        out.push({
-          id: `cf-xlsx-${idx++}`,
-          range,
-          condition: { kind: 'text-contains', value: r.text },
-          style,
-        })
-        continue
-      } else if (r.type === 'duplicateValues') {
-        out.push({
-          id: `cf-xlsx-${idx++}`,
-          range,
-          condition: { kind: 'duplicate', value: '' },
-          style,
-        })
-        continue
-      } else if (r.type === 'expression' && r.formulae?.[0]) {
-        out.push({
-          id: `cf-xlsx-${idx++}`,
-          range,
-          condition: { kind: 'custom-formula', value: String(r.formulae[0]) },
-          style,
-        })
-        continue
-      }
-      losses.add('conditional-formatting rules (some Excel rule types could not be mapped)')
-    }
-  }
-  return out
-}
-
-function exportXlsxValidations(
-  worksheet: ExcelJS.Worksheet,
-  validations: ValidationRule[] | undefined,
-): void {
-  if (!validations?.length) return
-  for (const rule of validations) {
-    let dv: ExcelJS.DataValidation | null = null
-    if (rule.kind === 'list') {
-      const formula = rule.sourceRange?.trim()
-        ? rule.sourceRange.trim()
-        : `"${(rule.options ?? []).join(',')}"`
-      dv = { type: 'list', allowBlank: true, formulae: [formula] }
-    } else if (rule.kind === 'number-range') {
-      if (rule.min !== undefined && rule.max !== undefined) {
-        dv = {
-          type: 'decimal',
-          operator: 'between',
-          allowBlank: true,
-          formulae: [rule.min, rule.max],
-        }
-      } else if (rule.min !== undefined) {
-        dv = {
-          type: 'decimal',
-          operator: 'greaterThanOrEqual',
-          allowBlank: true,
-          formulae: [rule.min],
-        }
-      } else if (rule.max !== undefined) {
-        dv = {
-          type: 'decimal',
-          operator: 'lessThanOrEqual',
-          allowBlank: true,
-          formulae: [rule.max],
-        }
-      }
-    } else if (rule.kind === 'date') {
-      dv = { type: 'date', allowBlank: true, formulae: [] }
-    } else if (rule.kind === 'text-length') {
-      dv = {
-        type: 'textLength',
-        operator: 'between',
-        allowBlank: true,
-        formulae: [rule.min ?? 0, rule.max ?? 10_000],
-      }
-    } else if (rule.kind === 'custom-formula' && rule.formula) {
-      dv = {
-        type: 'custom',
-        allowBlank: true,
-        formulae: [rule.formula.replace(/^=/, '')],
-      }
-    }
-    if (!dv) continue
-    for (const cell of cellsInRange(rule.range, 5_000)) {
-      worksheet.getCell(cell).dataValidation = dv
-    }
-  }
-}
-
-function exportXlsxConditionalFormats(
-  worksheet: ExcelJS.Worksheet,
-  rules: ConditionalFormatRule[] | undefined,
-): void {
-  if (!rules?.length) return
-  for (const rule of rules) {
-    const style: Partial<ExcelJS.Style> = {}
-    if (rule.style.bold || rule.style.italic || rule.style.textColor) {
-      style.font = {
-        ...(rule.style.bold ? { bold: true } : {}),
-        ...(rule.style.italic ? { italic: true } : {}),
-        ...(rule.style.textColor
-          ? { color: { argb: hexToArgb(rule.style.textColor) } }
-          : {}),
-      }
-    }
-    if (rule.style.fillColor) {
-      style.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        bgColor: { argb: hexToArgb(rule.style.fillColor) },
-        fgColor: { argb: hexToArgb(rule.style.fillColor) },
-      }
-    }
-    const k = rule.condition.kind
-    try {
-      if (k === 'greater' || k === 'less' || k === 'equal' || k === 'between') {
-        const opMap = {
-          greater: 'greaterThan',
-          less: 'lessThan',
-          equal: 'equal',
-          between: 'between',
-        } as const
-        worksheet.addConditionalFormatting({
-          ref: rule.range,
-          rules: [
-            {
-              type: 'cellIs',
-              priority: 1,
-              operator: opMap[k],
-              formulae:
-                k === 'between'
-                  ? [rule.condition.value, rule.condition.value2 ?? rule.condition.value]
-                  : [rule.condition.value],
-              style,
-            },
-          ],
-        })
-      } else if (k === 'text-contains') {
-        worksheet.addConditionalFormatting({
-          ref: rule.range,
-          rules: [
-            {
-              type: 'containsText',
-              priority: 1,
-              operator: 'containsText',
-              text: rule.condition.value,
-              style,
-            },
-          ],
-        })
-      } else if (k === 'custom-formula' && rule.condition.value.trim()) {
-        worksheet.addConditionalFormatting({
-          ref: rule.range,
-          rules: [
-            {
-              type: 'expression',
-              priority: 1,
-              formulae: [rule.condition.value.replace(/^=/, '')],
-              style,
-            },
-          ],
-        })
-      }
-    } catch {
-      // ignore unsupported ExcelJS CF edge cases
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------

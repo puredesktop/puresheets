@@ -247,6 +247,7 @@ export function CommandBar({
   findFocusRequest = 0,
   findText,
   replaceText,
+  analysisActions,
   findMatchCount = 0,
   findActiveIndex = -1,
   onUndo,
@@ -351,6 +352,7 @@ export function CommandBar({
   findFocusRequest?: number
   findText: string
   replaceText: string
+  analysisActions?: React.ReactNode
   findMatchCount?: number
   findActiveIndex?: number
   onUndo: () => void
@@ -511,6 +513,7 @@ export function CommandBar({
           ))}
         </Sections>
         <QuickActions>
+          {analysisActions}
           <ToolIconButton
             title="Undo"
             onClick={onUndo}
