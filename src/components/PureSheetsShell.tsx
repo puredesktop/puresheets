@@ -1,5 +1,8 @@
 import { linkedTableHtml, tableSnapshotHtml, type LinkedTableReference } from '@purescience/platform-editor/linkedTable'
 import { workbookLinkedSnapshot } from '../lib/linkedTables'
+import { publishSheetLiveData, sendSheetToApp } from '../lib/liveDataPublisher'
+import { WorkspaceThreadStrip } from '@purescience/platform-ui/suite'
+import { bridge } from '@purescience/platform-ui/bridge/client'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLiveJson } from '@purescience/platform-ui/editing/live/useLiveJson'
 import type React from 'react'
@@ -4242,6 +4245,78 @@ export function PureSheetsShell({
             onHideSheet={hideSheetById}
             onUnhideSheet={unhideSheetById}
           />
+          {!compact && (
+            <div
+              data-testid="sheets-live-data-bar"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '4px 10px',
+                borderTop: '1px solid var(--n-line, #d4d7dc)',
+                background: 'var(--n-panel, #f6f7f8)',
+                fontSize: '11.5px',
+                flexWrap: 'wrap',
+              }}
+            >
+              <strong style={{ fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--n-soft, #474c54)' }}>
+                Live Data &amp; Transform:
+              </strong>
+              <button
+                type="button"
+                onClick={() => {
+                  void publishSheetLiveData(document, activeSheet, bridge)
+                    .then(ds =>
+                      showToast(`Published live dataset "${ds.name}" (${ds.metrics.length} KPIs, ${ds.table.rows.length} rows).`),
+                    )
+                    .catch(reportFailure)
+                }}
+                style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px', fontWeight: 600 }}
+              >
+                Publish live dataset
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sendSheetToApp(document, activeSheet, 'pureslides', bridge)
+                    .then(() =>
+                      showToast(`Sent "${activeSheet.name}" live metrics & table to PureSlides.`),
+                    )
+                    .catch(reportFailure)
+                }}
+                style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px' }}
+              >
+                Send to PureSlides
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sendSheetToApp(document, activeSheet, 'canvas2', bridge)
+                    .then(() =>
+                      showToast(`Sent "${activeSheet.name}" live metrics & table to PureCanvas.`),
+                    )
+                    .catch(reportFailure)
+                }}
+                style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px' }}
+              >
+                Send to PureCanvas
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sendSheetToApp(document, activeSheet, 'puresite', bridge)
+                    .then(() =>
+                      showToast(`Sent "${activeSheet.name}" live metrics & table to PureSite.`),
+                    )
+                    .catch(reportFailure)
+                }}
+                style={{ padding: '2px 8px', borderRadius: '3px', border: '1px solid var(--n-line, #c8ccd2)', background: 'var(--n-sheet, #fff)', cursor: 'pointer', fontSize: '11px' }}
+              >
+                Send to PureSite
+              </button>
+            </div>
+          )}
+          {!compact && <WorkspaceThreadStrip app="puresheets" />}
         </SheetSurface>
 
         <CommandPalette
