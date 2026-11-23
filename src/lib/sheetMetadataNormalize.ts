@@ -158,6 +158,9 @@ export function normalizeValidations(
     if (typeof item.max === 'number' && Number.isFinite(item.max)) {
       rule.max = item.max
     }
+    if (item.whole === true) {
+      rule.whole = true
+    }
     if (typeof item.textQuery === 'string' && item.textQuery.trim()) {
       rule.textQuery = item.textQuery
     }
@@ -336,6 +339,24 @@ export function normalizePivotDefinition(
     sourceSignature:
       typeof input.sourceSignature === 'string'
         ? input.sourceSignature
+        : undefined,
+    output:
+      typeof input.output === 'string' && isSafeCellKey(input.output)
+        ? input.output.trim().toUpperCase()
+        : undefined,
+    outputRows:
+      typeof input.outputRows === 'number' &&
+      Number.isInteger(input.outputRows) &&
+      input.outputRows >= 1 &&
+      input.outputRows <= 25_000
+        ? input.outputRows
+        : undefined,
+    outputColumns:
+      typeof input.outputColumns === 'number' &&
+      Number.isInteger(input.outputColumns) &&
+      input.outputColumns >= 1 &&
+      input.outputColumns <= 25_000
+        ? input.outputColumns
         : undefined,
   }
 }

@@ -106,6 +106,8 @@ export interface ValidationRule {
   /** Inclusive bounds for `number-range` or `text-length` rules. */
   min?: number
   max?: number
+  /** When true, `number-range` requires whole numbers (integers). */
+  whole?: boolean
   /** Substring for `text-contains` rules. */
   textQuery?: string
   /** Custom formula for `custom-formula` rules (truthy = valid). */
@@ -198,6 +200,10 @@ export interface PivotDefinition {
   filters?: PivotFilterRef[]
   refreshedAt: string
   sourceSignature?: string
+  /** Optional output placement/size bounds preserved for Excel and Analyze pivots. */
+  output?: string
+  outputRows?: number
+  outputColumns?: number
 }
 
 /** Workbook-level Named Range (Wave 2). */
