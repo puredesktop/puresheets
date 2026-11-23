@@ -1,0 +1,476 @@
+import type {
+  AppOperationExposure,
+  AppOperationRisk,
+} from '@purescience/platform-ui/bridge/appFunctions'
+import type { PureSheetsAtomicToolName } from './catalog'
+
+export interface PureSheetsAtomicToolSchema {
+  name: PureSheetsAtomicToolName
+  category:
+    | 'workbook'
+    | 'cells'
+    | 'sheets'
+    | 'search'
+    | 'formatting'
+    | 'annotations'
+    | 'charts'
+    | 'reference'
+  exposure: AppOperationExposure
+  risk: AppOperationRisk
+  requiresApproval: boolean
+  description: string
+  inputSchema: Record<string, unknown> & { type: 'object' }
+  releaseButton?: string
+  deletesPermanently?: boolean
+  riskWhen?: Record<string, 'write' | 'destructive' | 'external' | 'release'>
+  requiresCapabilities?: Array<'vision'>
+}
+
+/**
+ * Lossless metadata & JSON schemas for all 17 PureSheets atomic tools.
+ *
+ * Exposure tiers:
+ *   - 4 `always` core tools (~24%): `getSheetsContext`, `readRange`,
+ *     `applyCellChanges`, `completeWorkbook`.
+ *   - 13 `extended` specialist tools (~76%): 100% discoverable via
+ *     `discoverAppTools` and callable via `callExtendedReadTool` /
+ *     `callExtendedTool` with zero lost functionality.
+ */
+export const PURESHEETS_ATOMIC_TOOL_SCHEMAS: readonly PureSheetsAtomicToolSchema[] =
+  [
+    // ── Core atomic tools (exposure: 'always') ───────────────────────────────
+    {
+      name: 'getSheetsContext',
+      category: 'workbook',
+      exposure: 'always',
+      risk: 'read',
+      requiresApproval: false,
+      description:
+        'Return the workbook: title, path, sheets with used ranges, locked ranges, chart counts, the active sheet, and the current selection.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'readRange',
+      category: 'cells',
+      exposure: 'always',
+      risk: 'read',
+      requiresApproval: false,
+      description:
+        "Read the populated cells of an A1 range on one sheet: raw value, kind, and computed value for formulas. Omit range to read the sheet's used range. Capped at 500 cells.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          range: {
+            type: 'string',
+          },
+        },
+      },
+    },
+    {
+      name: 'applyCellChanges',
+      category: 'cells',
+      exposure: 'always',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        "Write cell changes to a sheet directly. Every write is recorded in the workbook's agent log with before/after. Pass the sheet, the range the work covers, the cell changes, and a one-line summary — it is the line the user reads in the log. Requires an explicit sheet, target range and current expectedVersion from readRange/getSheetsContext. All changed cells must lie in the target range; stale workbook proposals are rejected. Call completeWorkbook after changes for saved artifact evidence.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          range: {
+            type: 'string',
+          },
+          summary: {
+            type: 'string',
+          },
+          cellChanges: {
+            type: 'array',
+            description:
+              "The cells to write: A1 key, value (raw text or formula source), and kind. Formulas are kind 'formula' with the leading =. Locked cells are skipped, never mutated.",
+            items: {
+              type: 'object',
+              properties: {
+                cell: {
+                  type: 'string',
+                },
+                value: {
+                  type: 'string',
+                },
+                kind: {
+                  type: 'string',
+                  enum: ['text', 'number', 'formula', 'blank'],
+                },
+              },
+              required: ['cell', 'value', 'kind'],
+            },
+          },
+          expectedVersion: {
+            type: 'string',
+            description:
+              'Exact workbook version returned by getSheetsContext/readRange. Read again after any mutation.',
+          },
+        },
+        required: [
+          'sheet',
+          'range',
+          'expectedVersion',
+          'summary',
+          'cellChanges',
+        ],
+      },
+    },
+    {
+      name: 'completeWorkbook',
+      category: 'workbook',
+      exposure: 'always',
+      risk: 'write',
+      requiresApproval: false,
+      description:
+        'Save the current workbook, verify its saved content, and return its durable deliverable receipt. Required after all requested writes before completing a mission. Use the returned workbook paths in the final result, never an upstream source path. Retry after a reported save or concurrent-change error; do not claim completion on error.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+
+    // ── Extended specialist atomic tools (exposure: 'extended') ──────────────
+    {
+      name: 'openWorkbook',
+      category: 'workbook',
+      exposure: 'extended',
+      risk: 'read',
+      requiresApproval: false,
+      description:
+        'Open an existing .sheets/.sheets.html workbook, or import an Excel .xlsx or a .csv/.tsv from an exact path. Use before auditing a spreadsheet supplied by the user; do not audit a blank restored workbook instead. Flushes current edits before switching. Excel and CSV imports create a separate native workbook and leave the original file as it is. An .xlsx keeps every sheet and its name, values and formulas (cross-sheet ones too), number formats, merged cells, column widths and row heights, bold/italic/fill/font colour/borders/alignment and frozen panes; returns the title, source path and warnings naming anything that did not come over. Read getSheetsContext and readRange next. Call completeWorkbook after any changes to save a separate deliverable.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            minLength: 1,
+          },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'createWorkbook',
+      category: 'workbook',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Start a NEW blank workbook without replacing the currently open file. Required when asked to create a new deliverable or preserve existing documents: a workbook restored on app startup is not permission to overwrite it. Flushes pending edits before switching; on failure the current workbook stays open. Then populate this fresh workbook and call completeWorkbook to save it to a unique new package. Do not use for requested edits to the current workbook.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            minLength: 1,
+          },
+        },
+        required: ['title'],
+      },
+    },
+    {
+      name: 'saveWorkbookAsXlsx',
+      category: 'workbook',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        "Save a copy of the current workbook as an Excel .xlsx file at an exact path, the same as the menu's Save as Excel. Writes every sheet with its values and formulas, number formats, merged cells, column widths and row heights, cell styles, frozen panes and notes. The workbook stays bound to its own .sheets file; this does not replace completeWorkbook. Refuses to replace an existing file unless overwrite is true, which needs the user's say-so. Returns the path, the sheets written and warnings naming what Excel will not get (charts, validation and conditional-formatting rules, locks).",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            minLength: 1,
+            description: 'Absolute path ending in .xlsx.',
+          },
+          overwrite: {
+            type: 'boolean',
+            description:
+              'Replace an existing file at path. Only when the user asked for it.',
+          },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'listSheetChanges',
+      category: 'workbook',
+      exposure: 'extended',
+      risk: 'read',
+      requiresApproval: false,
+      description:
+        'The agent log: recent agent writes to the workbook, newest first, with tool, summary, sheet, range, and changed-cell counts. Check it before repeating work another agent already did.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'number',
+          },
+        },
+      },
+    },
+    {
+      name: 'findInWorkbook',
+      category: 'search',
+      exposure: 'extended',
+      risk: 'read',
+      requiresApproval: false,
+      description:
+        'Find cells containing text across the workbook (or one sheet). Returns sheet, cell, and value, capped at 50 matches.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+          },
+          sheet: {
+            type: 'string',
+          },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'addSheet',
+      category: 'sheets',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Add a blank sheet to the workbook and make it active. Refuses a name an existing sheet already carries.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'renameSheet',
+      category: 'sheets',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Rename a sheet. Refuses a name another sheet already carries. Recorded in the agent log.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          name: {
+            type: 'string',
+          },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'deleteSheet',
+      category: 'sheets',
+      exposure: 'extended',
+      risk: 'destructive',
+      requiresApproval: true,
+      description:
+        'Delete a sheet by name or id — never defaults to the active sheet, and the last sheet cannot be deleted. Recorded in the agent log with its populated-cell count.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+        },
+        required: ['sheet'],
+      },
+    },
+    {
+      name: 'formatRange',
+      category: 'formatting',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Apply cell formatting over an A1 range: bold, italic, underline, border, fontSize, textColor/fillColor (#RRGGBB), align, numberFormat, decimals, wrap (wrap|clip|overflow). Optional columnWidth (56–360 pixels) and rowHeight (24–160 pixels) resize entire columns/rows intersecting the range; size changes are refused on protected sheets. For prose tables, use wrapping and suitable sizes so content is readable; keep source IDs in concise notes rather than oversized prose cells. Recorded in the agent log.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          range: {
+            type: 'string',
+          },
+          bold: {
+            type: 'boolean',
+          },
+          wrap: {
+            type: 'string',
+            enum: ['wrap', 'clip', 'overflow'],
+          },
+          columnWidth: {
+            type: 'number',
+            minimum: 56,
+            maximum: 360,
+          },
+          rowHeight: {
+            type: 'number',
+            minimum: 24,
+            maximum: 160,
+          },
+          italic: {
+            type: 'boolean',
+          },
+          underline: {
+            type: 'boolean',
+          },
+          border: {
+            type: 'boolean',
+          },
+          fontSize: {
+            type: 'number',
+          },
+          textColor: {
+            type: 'string',
+          },
+          fillColor: {
+            type: 'string',
+          },
+          align: {
+            type: 'string',
+            enum: ['left', 'center', 'right'],
+          },
+          numberFormat: {
+            type: 'string',
+            enum: ['text', 'number', 'currency', 'percent', 'date'],
+          },
+          decimals: {
+            type: 'number',
+          },
+          summary: {
+            type: 'string',
+          },
+        },
+        required: ['range'],
+      },
+    },
+    {
+      name: 'autoFitRows',
+      category: 'formatting',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Fit row heights using the live spreadsheet renderer after setting content, fonts and column widths. Enables text wrapping across the specified whole rows. Use for prose tables before completeWorkbook to avoid clipped text; not a content-quality check. Refused on protected sheets or when the renderer is unavailable.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          startRow: {
+            type: 'integer',
+            minimum: 1,
+          },
+          rowCount: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 100,
+          },
+        },
+        required: ['startRow', 'rowCount'],
+      },
+    },
+    {
+      name: 'setCellComment',
+      category: 'annotations',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Set or clear the note on one cell. An empty comment clears it. Notes annotate — they never change cell values.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          cell: {
+            type: 'string',
+          },
+          comment: {
+            type: 'string',
+          },
+        },
+        required: ['cell'],
+      },
+    },
+    {
+      name: 'addChart',
+      category: 'charts',
+      exposure: 'extended',
+      risk: 'write',
+      requiresApproval: true,
+      description:
+        'Add a chart from a range (bar, line, area, pie, donut, scatter). The range needs labels and numeric values. Recorded in the agent log.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sheet: {
+            type: 'string',
+          },
+          range: {
+            type: 'string',
+          },
+          type: {
+            type: 'string',
+            enum: ['bar', 'line', 'area', 'pie', 'donut', 'scatter'],
+          },
+          summary: {
+            type: 'string',
+          },
+        },
+        required: ['range'],
+      },
+    },
+    {
+      name: 'getExchangeRate',
+      category: 'reference',
+      exposure: 'extended',
+      risk: 'read',
+      requiresApproval: false,
+      description:
+        'Fetch a dated published reference exchange rate from Frankfurter. Returns rate, asOf date and source URL; no models and no workbook mutations. Use the rate in formulas, cite its source/date, and never invent a rate on failure.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          from: {
+            type: 'string',
+            description: 'Source ISO currency code, e.g. USD',
+          },
+          to: {
+            type: 'string',
+            description: 'Target ISO currency code, e.g. EUR',
+          },
+        },
+        required: ['from', 'to'],
+      },
+    },
+  ] as const
